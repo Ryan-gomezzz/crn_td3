@@ -1,17 +1,8 @@
-<br>
-
-<div align="center">
-
-```
- ██████╗██████╗ ███╗   ██╗    ████████╗██████╗ ██████╗
-██╔════╝██╔══██╗████╗  ██║    ╚══██╔══╝██╔══██╗╚════██╗
-██║     ██████╔╝██╔██╗ ██║       ██║   ██║  ██║  ▄███╔╝
-██║     ██╔══██╗██║╚██╗██║       ██║   ██║  ██║  ▀▀══╝
-╚██████╗██║  ██║██║ ╚████║       ██║   ██████╔╝  ██╗
- ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝       ╚═╝   ╚═════╝   ╚═╝
-```
-
 # Cognitive Radio Network — TD3 Power Allocation
+
+<p align="center">
+  <img src="https://readme-typing-svg.herokuapp.com?font=Fira+Code&size=32&pause=1000&color=FFFFFF&background=00000000&center=true&width=800&lines=Cognitive+Radio+Network;TD3+Power+Allocation" alt="Animated Heading" />
+</p>
 
 **Deep Reinforcement Learning for Intelligent Spectrum Management**
 
