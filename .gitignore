@@ -1,0 +1,23 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.env/
+.env
+env/
+.venv/
+
+# VS Code settings
+.vscode/
+
+# PyTorch model weights and checkpoints
+*.pth
+checkpoints/
+saved_models/
+
+# Misc
+*.log
+.DS_Store
