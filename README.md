@@ -6,7 +6,7 @@
 
 **Deep Reinforcement Learning for Intelligent Spectrum Management**
 
-*Academic Mini-Project | Ramaiah Institute of Technology, Bangalore*
+*Academic Mini-Project guided by Dr. Chitra M  | by Aditya Gangwani, Ryan Gomez, Shreya Revankar and Sneha Tapadar*
 
 ---
 
@@ -38,17 +38,17 @@ The learning agent is a **TD3 (Twin Delayed DDPG)** neural network controller. W
 ┌─────────────────────────────────────────────────────────────────┐
 │                   COGNITIVE RADIO NETWORK                       │
 │                                                                 │
-│    PT ══════[ h_pp ]══════════════════════════════> PR         │
-│  (fixed)        Primary Link (must be protected!)     (victim) │
+│    PT ══════[ h_pp ]══════════════════════════════> PR          │
+│  (fixed)        Primary Link (must be protected!)     (victim)  │
 │    │                                                    ▲       │
-│    │ h_ps                                        h_sp  │       │
+│    │ h_ps                                        h_sp  │        │
 │    │ (interference                          (interference│      │
-│    │  to SU)                                 to PU!)   │       │
+│    │  to SU)                                 to PU!)   │        │
 │    ▼                                                    │       │
 │    SR <══════[ h_ss ]══════════════════════════════  ST         │
-│  (goal)         SU Link (maximise throughput!)     (agent)     │
-│                                                     P_s ∈      │
-│                                                   [0, P_max]   │
+│  (goal)         SU Link (maximise throughput!)     (agent)      │
+│                                                     P_s ∈       │
+│                                                   [0, P_max]    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -83,11 +83,11 @@ R_s = log₂(1 + SINR_s)   [bits/s/Hz]
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                                                                         │
-│   r = α · R_s  −  β · max(0, γ_th − SINR_p)  −  γ · (P_s / P_max)    │
+│   r = α · R_s  −  β · max(0, γ_th − SINR_p)  −  γ · (P_s / P_max)       │
 │         ▲                      ▲                        ▲               │
-│    Throughput              PU violation              Energy              │
+│    Throughput              PU violation              Energy             | 
 │    reward                  penalty                   penalty            │
-│    (α = 1.0)               (β = 10.0)                (γ = 0.01)        │
+│    (α = 1.0)               (β = 10.0)                (γ = 0.01)         │
 │                            γ_th = 2.0                                   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -102,23 +102,23 @@ R_s = log₂(1 + SINR_s)   [bits/s/Hz]
 ┌────────────────────────────────────────────────────────────────────┐
 │                      TD3 AGENT                                     │
 │                                                                    │
-│  ┌─────────────┐    select_action(s)    ┌──────────────────────┐  │
-│  │    ACTOR    │ ─────────────────────► │   ENVIRONMENT (CRN)  │  │
-│  │  π_φ(s)     │                        │                      │  │
-│  │  7→256→256→1│ ◄── soft update ──     │  Rayleigh channels   │  │
-│  └─────────────┘        (τ=0.005)       │  SINR computation    │  │
-│         ▲                               │  Reward function     │  │
-│    actor loss                           └──────────┬───────────┘  │
-│   -Q₁(s,π(s))           s, a, r, s'    │                          │
-│         │               ─────────────► │   REPLAY BUFFER          │
-│  ┌──────┴──────┐                       │   (100,000 transitions)  │
-│  │  CRITIC 1   │ ◄──── sample batch ── └──────────────────────┘  │
-│  │  Q_θ₁(s,a) │                                                   │
-│  │ 8→256→256→1 │   Target Q = r + γ·min(Q₁', Q₂')               │
+│  ┌─────────────┐    select_action(s)    ┌──────────────────────┐   │
+│  │    ACTOR    │ ─────────────────────► │   ENVIRONMENT (CRN)  │   │
+│  │  π_φ(s)     │                        │                      │   │
+│  │  7→256→256→1│ ◄── soft update ──     │  Rayleigh channels   │   │
+│  └─────────────┘        (τ=0.005)       │  SINR computation    │   │
+│         ▲                               │  Reward function     │   │
+│    actor loss                           └──────────┬───────────┘   │
+│   -Q₁(s,π(s))           s, a, r, s'    │                      |    │
+│         │               ─────────────► │ REPLAY BUFFER        |    │
+│  ┌──────┴──────┐                       │ (100,000 transitions)|    │
+│  │  CRITIC 1   │ ◄──── sample batch ── └──────────────────────┘    │
+│  │  Q_θ₁(s,a) │                                                    │
+│  │ 8→256→256→1 │   Target Q = r + γ·min(Q₁', Q₂')                  │
 │  └─────────────┘                                                   │
-│  ┌─────────────┐   ← MSE loss on both critics every step          │
-│  │  CRITIC 2   │   ← Actor update every 2nd critic step           │
-│  │  Q_θ₂(s,a) │   ← Target policy smoothing (clipped noise)      │
+│  ┌─────────────┐   ← MSE loss on both critics every step           │
+│  │  CRITIC 2   │   ← Actor update every 2nd critic step            │
+│  │  Q_θ₂(s,a) │   ← Target policy smoothing (clipped noise)        │
 │  └─────────────┘                                                   │
 └────────────────────────────────────────────────────────────────────┘
 ```
@@ -145,16 +145,16 @@ The **1620×900 pixel window** is divided into four panels:
 ├─────────────────────────┬──────────────────────┬──────────────────────────  ┤
 │                         │  Episode Reward       │                           │
 │   NETWORK               │  ████ raw + avg100    │    AI INSIGHTS            │
-│   VISUALIZATION         ├──────────────────────┤                           │
+│   VISUALIZATION         ├──────────────────────┤                            │
 │                         │  SU Throughput R_s    │  • Training Stage badge   │
 │   PT ──────────── PR    │  ████                 │  • PU Protection Rate     │
-│   │ (green=OK/red=bad)  ├──────────────────────┤  • Reward Trend arrow     │
+│   │ (green=OK/red=bad)  ├──────────────────────┤  • Reward Trend arrow      │
 │   │                     │  PU SINR              │  • Policy Insights text   │
 │   ST ──────────── SR    │  ████ — — threshold   │  • Violation Counter      │
 │      (blue = SU link)   │                       │  • Live stats             │
 ├─────────────────────────┴──────────────────────┴──────────────────────────  ┤
-│  [ 1× ] [ 5× ] [ 10× ] [ Max ]    [ Pause ]  [ Interf ]  [ Reset ]         │
-└──────────────────────────────────────────────────────────────────────────────┘
+│  [ 1× ] [ 5× ] [ 10× ] [ Max ]    [ Pause ]  [ Interf ]  [ Reset ]          │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Link Colour Coding
@@ -305,6 +305,6 @@ crn_td3/
 
 *Built with PyTorch · Pygame · NumPy*
 
-**Ramaiah Institute of Technology, Bangalore**
+**guided by Dr. Chitra M and developed by Aditya Gangwani, Ryan Gomez, Shreya Revankar and Sneha Tapadar**
 
 </div>
