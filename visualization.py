@@ -1,11 +1,11 @@
 # =============================================================================
 # visualization.py — Real-time Pygame GUI for the CRN TD3 simulation
 #
-# Four main classes:
-#   PlotSurface   — self-contained scrolling line-plot rendered with pygame.draw
-#   NetworkPanel  — animated 4-node CRN diagram (left panel)
-#   InsightsPanel — AI training analysis sidebar (far-right panel)
-#   PygameRenderer — top-level compositor; owns the pygame window
+# Redesigned for presentation quality: modern dark-dashboard aesthetic.
+#   - PlotSurface   : scrolling line plot with shaded area fills
+#   - NetworkPanel  : animated 4-node topology with glow nodes & circuit grid
+#   - InsightsPanel : card-based AI training analysis sidebar
+#   - PygameRenderer: top-level compositor owning the window
 # =============================================================================
 
 from __future__ import annotations
@@ -21,75 +21,154 @@ from config import (
     TOP_BAR_HEIGHT, BOTTOM_BAR_HEIGHT,
     NODE_POSITIONS, NODE_COLORS, NODE_RADIUS,
     SINR_THRESHOLD, P_MAX,
-    BG_COLOR, PANEL_BG, PANEL_BORDER, PLOT_BG,
-    WHITE, LIGHT_GRAY, GRAY, DARK_GRAY,
-    GREEN, RED, BLUE, ORANGE, PURPLE, YELLOW, CYAN,
-    LINK_PRIMARY_OK, LINK_PRIMARY_BAD, LINK_SU,
-    LINK_INTERF_SP, LINK_INTERF_PS,
     FPS_CAP,
 )
 
+# =============================================================================
+# Design system — local colour/style constants
+# =============================================================================
+
+DS = {
+    "bg":         (8,  11, 22),      # Window fill
+    "panel":      (12, 16, 32),      # Panel fill
+    "card":       (17, 22, 42),      # Card / plot fill
+    "card_hi":    (22, 29, 55),      # Slightly lighter card
+    "border":     (32, 43, 74),      # Subtle border
+    "border_hi":  (52, 70, 118),     # Active / accent border
+    "sep":        (24, 32, 58),      # Separator lines
+
+    "text_hi":    (230, 237, 255),   # Primary text
+    "text_sec":   (120, 140, 182),   # Secondary text
+    "text_muted": (55,  70, 105),    # Muted / hint text
+
+    "blue":       (59,  130, 246),   # Accent blue
+    "teal":       (20,  184, 166),   # Accent teal
+    "green":      (34,  197, 94),    # Accent green
+    "red":        (239, 68,  68),    # Accent red
+    "amber":      (245, 158, 11),    # Accent amber
+    "orange":     (249, 115, 22),    # Accent orange
+    "purple":     (168, 85,  247),   # Accent purple
+    "cyan":       (6,   182, 212),   # Accent cyan
+
+    "node_pt":    (52,  130, 219),
+    "node_pr":    (34,  197, 94),
+    "node_st":    (239, 68,  68),
+    "node_sr":    (168, 85,  247),
+}
+
+
+# ── Font loader ────────────────────────────────────────────────────────────────
+
+def _sysfont(names: list[str], size: int, bold: bool = False) -> pygame.font.Font:
+    """Load first available system font from the list."""
+    for name in names:
+        f = pygame.font.SysFont(name, size, bold=bold)
+        if f is not None:
+            return f
+    return pygame.font.SysFont(None, size, bold=bold)
+
+_SANS  = ["segoeui", "calibri", "tahoma", "arial", "helveticaneue", "helvetica", "freesans"]
+_MONO  = ["cascadiacodepl", "jetbrainsmono", "consolasligaturized", "consolas", "couriernew"]
+
 
 # =============================================================================
-# PlotSurface — pure-pygame scrolling line plot
+# Helper: draw a rounded filled rect with optional gradient header stripe
+# =============================================================================
+
+def _card(surf: pygame.Surface, rect: pygame.Rect,
+          bg: tuple = None, border: tuple = None,
+          radius: int = 8) -> None:
+    bg     = bg     or DS["card"]
+    border = border or DS["border"]
+    pygame.draw.rect(surf, bg,     rect, border_radius=radius)
+    pygame.draw.rect(surf, border, rect, 1, border_radius=radius)
+
+
+def _accent_bar(surf: pygame.Surface, x: int, y: int, w: int, h: int,
+                col: tuple, fraction: float, radius: int = 4) -> None:
+    """Rounded progress bar — background then filled portion."""
+    pygame.draw.rect(surf, DS["card"], (x, y, w, h), border_radius=radius)
+    pygame.draw.rect(surf, DS["border"], (x, y, w, h), 1, border_radius=radius)
+    fw = max(0, int(w * min(1.0, fraction)))
+    if fw > 2:
+        pygame.draw.rect(surf, col, (x, y, fw, h), border_radius=radius)
+
+
+def _glow_circle(surf: pygame.Surface, cx: int, cy: int,
+                 radius: int, color: tuple, layers: int = 5) -> None:
+    """Draw a soft glow around a circle using alpha surfaces."""
+    for i in range(layers, 0, -1):
+        r    = radius + i * 4
+        alpha = max(0, 55 - i * 10)
+        g_surf = pygame.Surface((r * 2 + 2, r * 2 + 2), pygame.SRCALPHA)
+        pygame.draw.circle(g_surf, (*color, alpha), (r + 1, r + 1), r)
+        surf.blit(g_surf, (cx - r - 1, cy - r - 1))
+
+
+# =============================================================================
+# PlotSurface — modern scrolling line plot with shaded area fill
 # =============================================================================
 
 class PlotSurface:
     """
-    A self-contained scrolling line plot rendered entirely with pygame.draw.
-    Supports multiple data series, axis labels, title, and an optional
-    horizontal threshold line.
-
-    Usage:
-        plot = PlotSurface(width=400, height=180, title="Reward", y_label="r",
-                           series_colors=[(150,150,150),(241,196,15)],
-                           series_names=["raw","avg100"])
-        plot.push(raw_val, avg_val)          # one value per series per call
-        surface = plot.render()
-        screen.blit(surface, (x, y))
+    Self-contained scrolling line plot with:
+      - Semi-transparent area fill under each series
+      - Subtle dotted grid
+      - Rounded card background
+      - Clean sans-serif labels
     """
 
-    PAD_LEFT   = 42
-    PAD_RIGHT  = 10
-    PAD_TOP    = 28
-    PAD_BOTTOM = 22
+    PAD_L = 48
+    PAD_R = 12
+    PAD_T = 36
+    PAD_B = 24
 
     def __init__(
         self,
-        width:         int,
-        height:        int,
-        title:         str,
-        y_label:       str  = "",
-        max_points:    int  = 400,
-        bg_color:      tuple = None,
-        series_colors: list  = None,
-        series_names:  list  = None,
-        y_min:         float | None = None,
-        y_max:         float | None = None,
-        threshold:     float | None = None,
-        threshold_color: tuple = (241, 196, 15),
+        width:          int,
+        height:         int,
+        title:          str,
+        y_label:        str   = "",
+        max_points:     int   = 500,
+        series_colors:  list  = None,
+        series_names:   list  = None,
+        y_min:          float | None = None,
+        y_max:          float | None = None,
+        threshold:      float | None = None,
+        threshold_color: tuple = None,
+        header_color:   tuple = None,
     ):
-        self.width   = width
-        self.height  = height
-        self.title   = title
-        self.y_label = y_label
-        self.max_points      = max_points
-        self.bg_color        = bg_color or PLOT_BG
-        self.series_colors   = series_colors or [CYAN]
-        self.series_names    = series_names  or [""]
-        self.y_min_fixed     = y_min
-        self.y_max_fixed     = y_max
-        self.threshold       = threshold
-        self.threshold_color = threshold_color
+        self.width          = width
+        self.height         = height
+        self.title          = title
+        self.y_label        = y_label
+        self.max_points     = max_points
+        self.series_colors  = series_colors or [DS["cyan"]]
+        self.series_names   = series_names  or [""]
+        self.y_min_fixed    = y_min
+        self.y_max_fixed    = y_max
+        self.threshold      = threshold
+        self.threshold_color = threshold_color or DS["amber"]
+        self.header_color   = header_color or DS["blue"]
 
         n = len(self.series_colors)
         self._data: list[deque] = [deque(maxlen=max_points) for _ in range(n)]
         self._surface = pygame.Surface((width, height))
+        self._fonts_ready = False
+
+    # ── Font init (called lazily after pygame.init) ─────────────────────────
+
+    def _init_fonts(self) -> None:
+        if self._fonts_ready:
+            return
+        self._f_title = _sysfont(_SANS, 13, bold=True)
+        self._f_tick  = _sysfont(_SANS, 10)
+        self._f_label = _sysfont(_SANS, 10)
+        self._fonts_ready = True
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def push(self, *values: float) -> None:
-        """Append one value per series (must match number of series)."""
         for i, v in enumerate(values):
             if i < len(self._data):
                 self._data[i].append(float(v))
@@ -99,24 +178,43 @@ class PlotSurface:
             d.clear()
 
     def render(self) -> pygame.Surface:
-        """Redraw the entire plot and return the surface."""
+        self._init_fonts()
         surf = self._surface
-        surf.fill(self.bg_color)
+        surf.fill(DS["bg"])
 
-        plot_w = self.width  - self.PAD_LEFT - self.PAD_RIGHT
-        plot_h = self.height - self.PAD_TOP  - self.PAD_BOTTOM
-        plot_x = self.PAD_LEFT
-        plot_y = self.PAD_TOP
+        pw = self.width  - self.PAD_L - self.PAD_R
+        ph = self.height - self.PAD_T - self.PAD_B
+        px = self.PAD_L
+        py = self.PAD_T
 
-        # ── Border rect ──────────────────────────────────────────────────────
-        pygame.draw.rect(surf, PANEL_BORDER,
-                         (plot_x, plot_y, plot_w, plot_h), 1)
+        # ── Card background ────────────────────────────────────────────────────
+        card_rect = pygame.Rect(0, 0, self.width, self.height)
+        pygame.draw.rect(surf, DS["card"], card_rect, border_radius=6)
+        pygame.draw.rect(surf, DS["border"], card_rect, 1, border_radius=6)
 
-        # ── Compute y range ──────────────────────────────────────────────────
+        # Accent left stripe
+        stripe_rect = pygame.Rect(0, 0, 3, self.height)
+        pygame.draw.rect(surf, self.header_color, stripe_rect,
+                         border_radius=3)
+
+        # Title
+        t_surf = self._f_title.render(self.title, True, DS["text_hi"])
+        surf.blit(t_surf, (px, 10))
+
+        # Live value of last data point (rightmost series)
+        if self._data and self._data[-1]:
+            last_v = self._data[-1][-1]
+            lv_col = self.series_colors[-1]
+            lv_s   = self._f_title.render(f"{last_v:+.3f}", True, lv_col)
+            surf.blit(lv_s, (self.width - self.PAD_R - lv_s.get_width(), 10))
+
+        # ── Plot area background ───────────────────────────────────────────────
+        plot_rect = pygame.Rect(px - 1, py - 1, pw + 2, ph + 2)
+        pygame.draw.rect(surf, DS["panel"], plot_rect)
+
+        # ── Compute y range ────────────────────────────────────────────────────
         all_vals = [v for d in self._data for v in d]
         if len(all_vals) < 2:
-            # Nothing meaningful to draw yet; just show title
-            self._draw_title(surf)
             return surf
 
         y_min = self.y_min_fixed if self.y_min_fixed is not None else min(all_vals)
@@ -124,100 +222,78 @@ class PlotSurface:
         if abs(y_max - y_min) < 1e-6:
             y_max = y_min + 1.0
 
-        # ── Grid lines (4 horizontal) ────────────────────────────────────────
-        for i in range(1, 4):
-            gy = plot_y + int(plot_h * i / 4)
-            pygame.draw.line(surf, DARK_GRAY, (plot_x, gy), (plot_x + plot_w, gy), 1)
-            # y tick label
-            tick_val = y_max - (y_max - y_min) * i / 4
-            self._draw_small_text(surf, f"{tick_val:.2f}", plot_x - 2, gy, align="right")
+        def to_py(v: float) -> int:
+            norm = (v - y_min) / (y_max - y_min)
+            return int(py + ph * (1.0 - norm))
 
-        # ── Y-axis extremes ──────────────────────────────────────────────────
-        self._draw_small_text(surf, f"{y_max:.2f}", plot_x - 2, plot_y, align="right")
-        self._draw_small_text(surf, f"{y_min:.2f}", plot_x - 2, plot_y + plot_h, align="right")
+        # ── Dotted grid (5 horizontal) ─────────────────────────────────────────
+        n_grid = 5
+        for i in range(n_grid + 1):
+            gy  = py + int(ph * i / n_grid)
+            gv  = y_max - (y_max - y_min) * i / n_grid
+            # Dashed horizontal line
+            for gx in range(px, px + pw, 8):
+                pygame.draw.line(surf, DS["sep"], (gx, gy), (min(gx + 4, px + pw), gy), 1)
+            # Y-tick label
+            tick_s = self._f_tick.render(f"{gv:.2f}", True, DS["text_muted"])
+            surf.blit(tick_s, (px - tick_s.get_width() - 4,
+                                gy - tick_s.get_height() // 2))
 
-        # ── Threshold line ───────────────────────────────────────────────────
+        # ── Threshold line ─────────────────────────────────────────────────────
         if self.threshold is not None:
-            ty = self._to_py(self.threshold, y_min, y_max, plot_y, plot_h)
-            if plot_y <= ty <= plot_y + plot_h:
-                self._draw_dashed_h_line(surf, self.threshold_color,
-                                         plot_x, ty, plot_w, dash=6, gap=4)
-                self._draw_small_text(surf, f"thr={self.threshold:.1f}",
-                                      plot_x + plot_w - 2, ty - 1, align="right",
-                                      color=self.threshold_color)
+            ty = to_py(self.threshold)
+            if py <= ty <= py + ph:
+                # Dashed threshold
+                for tx in range(px, px + pw, 10):
+                    pygame.draw.line(surf, self.threshold_color,
+                                     (tx, ty), (min(tx + 6, px + pw), ty), 1)
+                thr_s = self._f_tick.render(
+                    f"thr {self.threshold:.1f}", True, self.threshold_color)
+                surf.blit(thr_s, (px + pw - thr_s.get_width() - 2, ty - thr_s.get_height() - 2))
 
-        # ── Data series ──────────────────────────────────────────────────────
-        for series_idx, (d, color) in enumerate(zip(self._data, self.series_colors)):
+        # ── Data series ────────────────────────────────────────────────────────
+        for d, color in zip(self._data, self.series_colors):
             pts = list(d)
             if len(pts) < 2:
                 continue
+            n_pts = len(pts)
             pixel_pts = []
             for i, v in enumerate(pts):
-                px = plot_x + int(i / (self.max_points - 1) * plot_w)
-                py = self._to_py(v, y_min, y_max, plot_y, plot_h)
-                pixel_pts.append((px, py))
+                ppx = px + int(i / (self.max_points - 1) * pw)
+                ppy = to_py(v)
+                pixel_pts.append((ppx, ppy))
+
+            # ── Area fill (SRCALPHA polygon) ──────────────────────────────────
+            base_y = to_py(max(y_min, 0.0))  # Fill down to zero or y_min
+            base_y = max(py, min(py + ph, base_y))
+
+            fill_pts = [(pixel_pts[0][0], base_y)]
+            fill_pts.extend(pixel_pts)
+            fill_pts.append((pixel_pts[-1][0], base_y))
+
+            fill_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            pygame.draw.polygon(fill_surf, (*color, 35), fill_pts)
+            surf.blit(fill_surf, (0, 0))
+
+            # ── Line ──────────────────────────────────────────────────────────
             pygame.draw.lines(surf, color, False, pixel_pts, 2)
 
-        # ── Legend ───────────────────────────────────────────────────────────
-        if any(n for n in self.series_names):
-            lx = plot_x + 4
-            for i, (name, color) in enumerate(zip(self.series_names, self.series_colors)):
-                if name:
-                    pygame.draw.rect(surf, color, (lx, plot_y + 4 + i * 12, 8, 3))
-                    self._draw_small_text(surf, name, lx + 10, plot_y + 2 + i * 12,
-                                          color=color, align="left")
+        # ── Legend ────────────────────────────────────────────────────────────
+        lx = px + 4
+        for name, color in zip(self.series_names, self.series_colors):
+            if name:
+                pygame.draw.rect(surf, color, (lx, py + 4, 14, 3), border_radius=1)
+                ns = self._f_label.render(name, True, color)
+                surf.blit(ns, (lx + 17, py + 1))
+                lx += 17 + ns.get_width() + 10
 
-        self._draw_title(surf)
-        self._draw_y_label(surf, plot_y, plot_h)
+        # ── Y-axis label (rotated) ────────────────────────────────────────────
+        if self.y_label:
+            yl_s    = self._f_label.render(self.y_label, True, DS["text_muted"])
+            rotated = pygame.transform.rotate(yl_s, 90)
+            surf.blit(rotated, (6, py + ph // 2 - rotated.get_height() // 2))
+
         return surf
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _to_py(self, v: float, y_min: float, y_max: float,
-               plot_y: int, plot_h: int) -> int:
-        """Convert data value to pixel y (inverted: top = y_max)."""
-        norm = (v - y_min) / (y_max - y_min)
-        return int(plot_y + plot_h * (1.0 - norm))
-
-    def _init_fonts(self) -> None:
-        if not hasattr(self, '_font_small'):
-            self._font_small = pygame.font.SysFont("consolas", 10)
-            self._font_title = pygame.font.SysFont("consolas", 12, bold=True)
-
-    def _draw_title(self, surf: pygame.Surface) -> None:
-        self._init_fonts()
-        txt = self._font_title.render(self.title, True, LIGHT_GRAY)
-        surf.blit(txt, (self.PAD_LEFT + 2, 6))
-
-    def _draw_small_text(self, surf: pygame.Surface, text: str,
-                         x: int, y: int, color: tuple = GRAY,
-                         align: str = "right") -> None:
-        self._init_fonts()
-        txt = self._font_small.render(text, True, color)
-        if align == "right":
-            surf.blit(txt, (x - txt.get_width(), y - txt.get_height() // 2))
-        else:
-            surf.blit(txt, (x, y))
-
-    def _draw_y_label(self, surf: pygame.Surface, plot_y: int, plot_h: int) -> None:
-        if not self.y_label:
-            return
-        self._init_fonts()
-        txt = self._font_small.render(self.y_label, True, GRAY)
-        rotated = pygame.transform.rotate(txt, 90)
-        cx = 8
-        cy = plot_y + plot_h // 2
-        surf.blit(rotated, (cx - rotated.get_width() // 2,
-                             cy - rotated.get_height() // 2))
-
-    def _draw_dashed_h_line(self, surf: pygame.Surface, color: tuple,
-                             x: int, y: int, length: int,
-                             dash: int = 6, gap: int = 4) -> None:
-        pos = x
-        while pos < x + length:
-            end = min(pos + dash, x + length)
-            pygame.draw.line(surf, color, (pos, y), (end, y), 1)
-            pos += dash + gap
 
 
 # =============================================================================
@@ -226,110 +302,123 @@ class PlotSurface:
 
 class NetworkPanel:
     """
-    Renders the left panel showing the 4-node CRN topology:
-      - PT (Primary Transmitter)   — top-left
-      - PR (Primary Receiver)      — top-right
-      - ST (Secondary Transmitter) — bottom-left
-      - SR (Secondary Receiver)    — bottom-right
-
-    Communication links are drawn as colored lines:
-      - PT→PR: solid green (SINR_p ≥ threshold) or red (violation)
-      - ST→SR: solid blue, width ∝ SU throughput
-      - ST→PR: dashed red (interference to PU)
-      - PT→SR: dashed orange (interference to SU)
-
-    Signal pulses animate along each link driven by pulse_phase.
+    Left panel: animated topology with circuit-board grid background,
+    glowing nodes, pulse animations, and a channel-quality HUD.
     """
+
+    _NODE_R = 34   # Node radius
+
+    _NODE_COL = {
+        "PT": DS["node_pt"],
+        "PR": DS["node_pr"],
+        "ST": DS["node_st"],
+        "SR": DS["node_sr"],
+    }
 
     def __init__(self, width: int = LEFT_PANEL_WIDTH,
                  height: int = WINDOW_HEIGHT - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT):
         self.width  = width
         self.height = height
-
-        # Convert node positions to absolute coords within this panel
         self.positions = dict(NODE_POSITIONS)
+        self._fonts_ready = False
 
-        pygame.font.init()
-        self._font_label  = pygame.font.SysFont("consolas", 13, bold=True)
-        self._font_value  = pygame.font.SysFont("consolas", 11)
-        self._font_node   = pygame.font.SysFont("consolas", 12, bold=True)
+    def _init_fonts(self) -> None:
+        if self._fonts_ready:
+            return
+        self._f_node  = _sysfont(_SANS, 13, bold=True)
+        self._f_label = _sysfont(_SANS, 11, bold=True)
+        self._f_value = _sysfont(_SANS, 11)
+        self._f_small = _sysfont(_SANS, 10)
+        self._f_title = _sysfont(_SANS, 13, bold=True)
+        self._fonts_ready = True
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def render(
         self,
         surface:          pygame.Surface,
-        offset:           tuple,            # (x, y) panel origin on screen
-        state:            np.ndarray,       # 7D state vector
+        offset:           tuple,
+        state:            np.ndarray,
         p_s:              float,
         sinr_p:           float,
         sinr_s:           float,
         r_s:              float,
-        pulse_phase:      float,            # 0.0 → 1.0, drives animation
+        pulse_phase:      float,
         show_interference: bool = True,
     ) -> None:
+        self._init_fonts()
         ox, oy = offset
 
-        # ── Background ────────────────────────────────────────────────────────
+        # ── Panel background ───────────────────────────────────────────────────
         panel_rect = pygame.Rect(ox, oy, self.width, self.height)
-        pygame.draw.rect(surface, PANEL_BG, panel_rect)
-        pygame.draw.rect(surface, PANEL_BORDER, panel_rect, 1)
+        pygame.draw.rect(surface, DS["panel"], panel_rect)
 
-        # Dot grid (decorative)
-        for gx in range(ox + 20, ox + self.width - 10, 30):
-            for gy in range(oy + 20, oy + self.height - 10, 30):
-                pygame.draw.circle(surface, DARK_GRAY, (gx, gy), 1)
+        # Circuit-board dot grid
+        for gx in range(ox + 18, ox + self.width - 8, 28):
+            for gy in range(oy + 18, oy + self.height - 8, 28):
+                pygame.draw.circle(surface, DS["sep"], (gx, gy), 1)
+
+        # Panel border
+        pygame.draw.rect(surface, DS["border"], panel_rect, 1)
 
         pt = self._abs(ox, oy, "PT")
         pr = self._abs(ox, oy, "PR")
         st = self._abs(ox, oy, "ST")
         sr = self._abs(ox, oy, "SR")
 
-        # ── Interference links (drawn first, below primary links) ─────────────
+        pu_ok = sinr_p >= SINR_THRESHOLD
+        link_col = DS["green"] if pu_ok else DS["red"]
+
+        # ── Interference links (underneath) ───────────────────────────────────
         if show_interference:
-            # ST→PR dashed red
-            self._draw_dashed_line(surface, LINK_INTERF_SP, st, pr,
-                                   dash=8, gap=5, width=2)
-            # PT→SR dashed orange
-            self._draw_dashed_line(surface, LINK_INTERF_PS, pt, sr,
-                                   dash=8, gap=5, width=2)
-            # Pulse on interference links (slower, half phase)
-            self._draw_pulse(surface, st, pr, pulse_phase,      LINK_INTERF_SP, 4)
-            self._draw_pulse(surface, pt, sr, (pulse_phase + 0.5) % 1.0, LINK_INTERF_PS, 4)
+            self._dashed_line(surface, DS["red"],    st, pr, dash=9, gap=5, width=2)
+            self._dashed_line(surface, DS["orange"], pt, sr, dash=9, gap=5, width=2)
+            self._pulse(surface, st, pr, pulse_phase,              DS["red"],    4)
+            self._pulse(surface, pt, sr, (pulse_phase + 0.5) % 1.0, DS["orange"], 4)
 
-        # ── Primary link PT→PR ────────────────────────────────────────────────
-        link_color = LINK_PRIMARY_OK if sinr_p >= SINR_THRESHOLD else LINK_PRIMARY_BAD
-        pygame.draw.line(surface, link_color, pt, pr, 3)
-        self._draw_pulse(surface, pt, pr, pulse_phase, link_color, 6)
+        # ── Primary link PT→PR ─────────────────────────────────────────────────
+        # Glow line
+        self._glow_line(surface, link_col, pt, pr, glow_w=6, line_w=3)
+        self._pulse(surface, pt, pr, pulse_phase, link_col, 6)
 
-        # ── SU link ST→SR (thickness proportional to throughput) ──────────────
-        su_width = max(2, min(7, int(2 + r_s)))
-        pygame.draw.line(surface, LINK_SU, st, sr, su_width)
-        self._draw_pulse(surface, st, sr, (pulse_phase + 0.25) % 1.0, LINK_SU, 5)
+        # ── SU link ST→SR ──────────────────────────────────────────────────────
+        su_w = max(2, min(7, int(2 + r_s)))
+        self._glow_line(surface, DS["blue"], st, sr, glow_w=su_w + 4, line_w=su_w)
+        self._pulse(surface, st, sr, (pulse_phase + 0.25) % 1.0, DS["blue"], 5)
 
-        # ── Nodes ─────────────────────────────────────────────────────────────
-        pu_ok  = sinr_p >= SINR_THRESHOLD
-        su_ok  = sinr_s > 0.1
+        # ── Nodes ──────────────────────────────────────────────────────────────
+        halo_pu = DS["green"] if pu_ok else DS["red"]
+        halo_su = DS["green"] if sinr_s > 0.1 else DS["orange"]
 
-        self._draw_node(surface, pt, NODE_COLORS["PT"], "PT",
-                        halo=GREEN if pu_ok else RED)
-        self._draw_node(surface, pr, NODE_COLORS["PR"], "PR",
-                        halo=GREEN if pu_ok else RED)
-        self._draw_node(surface, st, NODE_COLORS["ST"], "ST",
-                        halo=GREEN if su_ok else ORANGE)
-        self._draw_node(surface, sr, NODE_COLORS["SR"], "SR",
-                        halo=GREEN if su_ok else ORANGE)
+        self._node(surface, pt, DS["node_pt"], "PT", halo_pu)
+        self._node(surface, pr, DS["node_pr"], "PR", halo_pu)
+        self._node(surface, st, DS["node_st"], "ST", halo_su)
+        self._node(surface, sr, DS["node_sr"], "SR", halo_su)
 
-        # ── Numeric readouts ──────────────────────────────────────────────────
-        self._draw_readouts(surface, ox, oy, p_s, sinr_p, sinr_s, r_s,
-                            pt, pr, st, sr)
+        # ── Value HUD (metric cards near nodes) ────────────────────────────────
+        self._hud_card(surface, pt[0] - 80, pt[1] - 68,
+                       "P_p", "1.00 W", DS["text_sec"])
+        sinr_col = DS["green"] if pu_ok else DS["red"]
+        self._hud_card(surface, pr[0] - 20, pr[1] - 68,
+                       "SINR_p", f"{sinr_p:.2f}", sinr_col)
+        self._hud_card(surface, st[0] - 80, st[1] + 44,
+                       "P_s", f"{p_s:.3f} W", DS["blue"])
+        self._hud_card(surface, sr[0] - 20, sr[1] + 44,
+                       "R_s", f"{r_s:.3f} b/s/Hz", DS["cyan"])
+        self._hud_card(surface, sr[0] - 20, sr[1] + 76,
+                       "SINR_s", f"{sinr_s:.2f}", DS["teal"])
 
-        # ── Power bar for ST ──────────────────────────────────────────────────
-        self._draw_power_bar(surface, ox + 20, oy + self.height - 130, p_s)
+        # ── Channel quality bars (bottom area) ────────────────────────────────
+        if state is not None and len(state) >= 4:
+            self._channel_bars(surface, ox + 12, oy + self.height - 105,
+                               state[:4])
 
-        # ── Panel title ───────────────────────────────────────────────────────
-        title_surf = self._font_label.render("CRN Network — Real-time", True, LIGHT_GRAY)
-        surface.blit(title_surf, (ox + 10, oy + 8))
+        # ── Power bar (ST) ────────────────────────────────────────────────────
+        self._power_bar(surface, ox + self.width - 42, oy + 140, p_s)
+
+        # ── Panel title ────────────────────────────────────────────────────────
+        title_s = self._f_title.render("NETWORK  TOPOLOGY", True, DS["teal"])
+        surface.blit(title_s, (ox + 10, oy + 8))
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
@@ -337,325 +426,338 @@ class NetworkPanel:
         x, y = self.positions[node]
         return (ox + x, oy + y)
 
-    def _draw_node(self, surface: pygame.Surface, pos: tuple,
-                   color: tuple, label: str,
-                   halo: tuple = None, radius: int = NODE_RADIUS) -> None:
+    def _node(self, surface: pygame.Surface, pos: tuple, color: tuple,
+              label: str, halo: tuple) -> None:
         x, y = pos
+        r = self._NODE_R
 
-        # Outer halo (glow effect using concentric transparent circles)
-        if halo:
-            for r in range(radius + 14, radius, -3):
-                alpha = max(0, 60 - (r - radius) * 6)
-                glow_surf = pygame.Surface((r * 2 + 2, r * 2 + 2), pygame.SRCALPHA)
-                pygame.draw.circle(glow_surf, (*halo, alpha), (r + 1, r + 1), r)
-                surface.blit(glow_surf, (x - r - 1, y - r - 1))
+        # Glow
+        _glow_circle(surface, x, y, r, halo, layers=4)
 
-        # Shadow
-        pygame.draw.circle(surface, (5, 5, 15), (x + 3, y + 3), radius)
-        # Filled circle
-        pygame.draw.circle(surface, color, (x, y), radius)
-        # White border ring
-        pygame.draw.circle(surface, WHITE, (x, y), radius, 2)
+        # Drop shadow
+        pygame.draw.circle(surface, (4, 5, 12), (x + 3, y + 4), r)
 
-        # Label text centered inside node
-        txt = self._font_node.render(label, True, WHITE)
+        # Filled body
+        pygame.draw.circle(surface, color, (x, y), r)
+
+        # Inner highlight ring (lighter top-left)
+        hi = tuple(min(255, c + 60) for c in color)
+        pygame.draw.circle(surface, hi, (x, y), r, 3)
+
+        # White border
+        pygame.draw.circle(surface, (200, 215, 245), (x, y), r, 2)
+
+        # Label
+        txt = self._f_node.render(label, True, (240, 245, 255))
         surface.blit(txt, (x - txt.get_width() // 2, y - txt.get_height() // 2))
 
-    def _draw_dashed_line(self, surface: pygame.Surface, color: tuple,
-                          start: tuple, end: tuple,
-                          dash: int = 8, gap: int = 5, width: int = 2) -> None:
-        """Draw a dashed line from start to end using the unit direction vector."""
-        sx, sy = start
-        ex, ey = end
+    def _hud_card(self, surface: pygame.Surface,
+                  x: int, y: int, key: str, value: str, val_col: tuple,
+                  w: int = 130, h: int = 28) -> None:
+        """Small labelled value card."""
+        rect = pygame.Rect(x, y, w, h)
+        pygame.draw.rect(surface, DS["card"], rect, border_radius=5)
+        pygame.draw.rect(surface, DS["border"], rect, 1, border_radius=5)
+
+        key_s = self._f_small.render(key, True, DS["text_muted"])
+        val_s = self._f_label.render(value, True, val_col)
+        surface.blit(key_s, (x + 6, y + 3))
+        surface.blit(val_s, (x + w - val_s.get_width() - 6, y + h - val_s.get_height() - 2))
+
+    def _dashed_line(self, surface: pygame.Surface, color: tuple,
+                     start: tuple, end: tuple,
+                     dash: int = 9, gap: int = 5, width: int = 2) -> None:
+        sx, sy = start; ex, ey = end
         dx, dy = ex - sx, ey - sy
-        length  = math.hypot(dx, dy)
-        if length < 1e-6:
+        length = math.hypot(dx, dy)
+        if length < 1:
             return
-        ux, uy = dx / length, dy / length   # unit vector
-
-        t = 0.0
-        drawing = True
+        ux, uy = dx / length, dy / length
+        t, on = 0.0, True
         while t < length:
-            seg_len = dash if drawing else gap
-            t_next  = min(t + seg_len, length)
-            if drawing:
-                p1 = (int(sx + ux * t),     int(sy + uy * t))
-                p2 = (int(sx + ux * t_next), int(sy + uy * t_next))
+            seg = dash if on else gap
+            tn  = min(t + seg, length)
+            if on:
+                p1 = (int(sx + ux * t),  int(sy + uy * t))
+                p2 = (int(sx + ux * tn), int(sy + uy * tn))
                 pygame.draw.line(surface, color, p1, p2, width)
-            t       = t_next
-            drawing = not drawing
+            t, on = tn, not on
 
-    def _draw_pulse(self, surface: pygame.Surface, start: tuple, end: tuple,
-                    phase: float, color: tuple, radius: int = 5) -> None:
-        """Draw a small filled circle traveling along the link at the given phase."""
-        sx, sy = start
-        ex, ey = end
+    def _glow_line(self, surface: pygame.Surface, color: tuple,
+                   start: tuple, end: tuple,
+                   glow_w: int = 6, line_w: int = 3) -> None:
+        """Draw a line with a soft halo underneath."""
+        glow_col = (*color, 40)
+        g_surf   = pygame.Surface((self.width + 20, self.height + 20), pygame.SRCALPHA)
+        ox_off   = surface.get_clip().x if surface.get_clip() else 0
+        pygame.draw.line(g_surf, glow_col,
+                         (start[0], start[1]),
+                         (end[0],   end[1]), glow_w + 2)
+        surface.blit(g_surf, (0, 0))
+        pygame.draw.line(surface, color, start, end, line_w)
+
+    def _pulse(self, surface: pygame.Surface, start: tuple, end: tuple,
+               phase: float, color: tuple, radius: int = 5) -> None:
+        sx, sy = start; ex, ey = end
         px = int(sx + (ex - sx) * phase)
         py = int(sy + (ey - sy) * phase)
-        pygame.draw.circle(surface, WHITE, (px, py), radius + 1)
-        pygame.draw.circle(surface, color, (px, py), radius)
+        pygame.draw.circle(surface, (255, 255, 255), (px, py), radius + 2)
+        pygame.draw.circle(surface, color,           (px, py), radius)
 
-    def _draw_power_bar(self, surface: pygame.Surface,
-                        x: int, y: int, p_s: float,
-                        bar_w: int = 18, bar_h: int = 100) -> None:
-        """Vertical power bar for ST. Color: green→yellow→red."""
+    def _power_bar(self, surface: pygame.Surface,
+                   x: int, y: int, p_s: float,
+                   bar_w: int = 18, bar_h: int = 200) -> None:
         fill_ratio = p_s / P_MAX
         fill_h     = int(bar_h * fill_ratio)
 
-        # Background (empty bar)
-        pygame.draw.rect(surface, DARK_GRAY, (x, y, bar_w, bar_h))
-        pygame.draw.rect(surface, PANEL_BORDER, (x, y, bar_w, bar_h), 1)
+        # Background
+        pygame.draw.rect(surface, DS["card"],   (x, y, bar_w, bar_h), border_radius=4)
+        pygame.draw.rect(surface, DS["border"], (x, y, bar_w, bar_h), 1, border_radius=4)
 
-        # Fill color gradient
-        if fill_ratio < 0.4:
-            bar_color = GREEN
-        elif fill_ratio < 0.7:
-            bar_color = YELLOW
+        # Colour by power level
+        if fill_ratio < 0.35:
+            col = DS["green"]
+        elif fill_ratio < 0.65:
+            col = DS["amber"]
         else:
-            bar_color = RED
+            col = DS["red"]
 
         if fill_h > 0:
-            pygame.draw.rect(surface, bar_color,
-                             (x, y + bar_h - fill_h, bar_w, fill_h))
+            top_y = y + bar_h - fill_h
+            pygame.draw.rect(surface, col, (x + 2, top_y, bar_w - 4, fill_h),
+                             border_radius=3)
 
-        # Label
-        label = self._font_value.render("P_s", True, LIGHT_GRAY)
-        surface.blit(label, (x + bar_w + 3, y + bar_h // 2 - 5))
-        pct = self._font_value.render(f"{p_s:.2f}W", True, bar_color)
-        surface.blit(pct, (x, y + bar_h + 3))
+        # Ticks every 25%
+        for frac in [0.25, 0.5, 0.75]:
+            ty = y + int(bar_h * (1 - frac))
+            pygame.draw.line(surface, DS["border_hi"], (x - 3, ty), (x + bar_w + 3, ty), 1)
 
-    def _draw_readouts(self, surface: pygame.Surface,
-                       ox: int, oy: int,
-                       p_s: float, sinr_p: float, sinr_s: float, r_s: float,
-                       pt: tuple, pr: tuple, st: tuple, sr: tuple) -> None:
-        """Draw numeric value labels near nodes."""
-        color_ok  = GREEN
-        color_bad = RED
+        # Labels
+        lbl_s = self._f_small.render("Tx", True, DS["text_muted"])
+        surface.blit(lbl_s, (x + bar_w // 2 - lbl_s.get_width() // 2, y - 16))
+        pct_s = self._f_small.render(f"{fill_ratio*100:.0f}%", True, col)
+        surface.blit(pct_s, (x + bar_w // 2 - pct_s.get_width() // 2, y + bar_h + 4))
 
-        def label(text, pos, dx, dy, color=LIGHT_GRAY):
-            txt = self._font_value.render(text, True, color)
-            surface.blit(txt, (pos[0] + dx, pos[1] + dy))
+    def _channel_bars(self, surface: pygame.Surface,
+                      x: int, y: int, gains: np.ndarray) -> None:
+        """Draw 4 mini channel-gain bars (h_pp, h_sp, h_ss, h_ps)."""
+        labels = ["h_pp", "h_sp", "h_ss", "h_ps"]
+        colors = [DS["teal"], DS["red"], DS["blue"], DS["orange"]]
+        bw, bh, gap = 66, 8, 6
 
-        # Near PT (top-left)
-        label(f"P_p=1.00W", pt, -NODE_RADIUS, -NODE_RADIUS - 28)
+        title_s = self._f_small.render("CHANNEL GAINS", True, DS["text_muted"])
+        surface.blit(title_s, (x, y - 16))
 
-        # Near PR — show SINR_p
-        sinr_p_col = color_ok if sinr_p >= SINR_THRESHOLD else color_bad
-        label(f"SINR_p={sinr_p:.2f}", pr, NODE_RADIUS // 2, -NODE_RADIUS - 28, sinr_p_col)
-
-        # Near ST — show P_s
-        label(f"P_s={p_s:.3f}W", st, -NODE_RADIUS - 10, NODE_RADIUS + 8)
-
-        # Near SR — show SINR_s and R_s
-        label(f"SINR_s={sinr_s:.2f}", sr, NODE_RADIUS // 2, NODE_RADIUS + 8)
-        label(f"R_s={r_s:.3f} b/s/Hz", sr, NODE_RADIUS // 2, NODE_RADIUS + 22, CYAN)
+        for i, (lbl, col, gain) in enumerate(zip(labels, colors, gains)):
+            bx = x + i * (bw + gap)
+            # Background bar
+            pygame.draw.rect(surface, DS["card"],   (bx, y, bw, bh), border_radius=3)
+            pygame.draw.rect(surface, DS["border"], (bx, y, bw, bh), 1, border_radius=3)
+            # Fill (cap at 3 for display)
+            fw = max(0, int(bw * min(1.0, gain / 3.0)))
+            if fw > 0:
+                pygame.draw.rect(surface, col, (bx, y, fw, bh), border_radius=3)
+            # Label
+            lbl_s = self._f_small.render(lbl, True, DS["text_muted"])
+            val_s = self._f_small.render(f"{gain:.2f}", True, col)
+            surface.blit(lbl_s, (bx, y + bh + 2))
+            surface.blit(val_s, (bx + bw - val_s.get_width(), y + bh + 2))
 
 
 # =============================================================================
-# InsightsPanel — AI training analysis sidebar
+# InsightsPanel — card-based AI training analysis sidebar
 # =============================================================================
 
 class InsightsPanel:
     """
-    Far-right sidebar showing real-time analytical summary of training.
-    Renders: training stage badge, progress bar, PU protection rate,
-    SU throughput stats, reward trend, power trend, policy insight text,
-    and a violation counter — all as pure Pygame drawing.
-
-    Expected stats dict keys:
-        episode, total_episodes, constraint_rate (0–1), avg_reward,
-        best_reward, avg_power, avg_r_s, peak_r_s, reward_trend (str),
-        power_trend (str), buffer_size, is_training, violations_last100,
-        policy_insight (str)
+    Far-right sidebar with card-based sections:
+      Training Stage badge | Progress | PU Protection | SU Throughput
+      Reward Trend | Avg Power | Violations | Policy Insight | Buffer
     """
 
-    def __init__(self, width: int = 240,
+    ACCENT  = DS["teal"]
+    PAD     = 10
+
+    def __init__(self, width: int = 300,
                  height: int = WINDOW_HEIGHT - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT):
         self.width  = width
         self.height = height
-        pygame.font.init()
-        self._f_title  = pygame.font.SysFont("consolas", 13, bold=True)
-        self._f_badge  = pygame.font.SysFont("consolas", 14, bold=True)
-        self._f_label  = pygame.font.SysFont("consolas", 11, bold=True)
-        self._f_value  = pygame.font.SysFont("consolas", 12)
-        self._f_small  = pygame.font.SysFont("consolas", 10)
-        self._f_insight= pygame.font.SysFont("consolas", 10)
+        self._fonts_ready = False
+
+    def _init_fonts(self) -> None:
+        if self._fonts_ready:
+            return
+        self._f_title   = _sysfont(_SANS, 15, bold=True)
+        self._f_section = _sysfont(_SANS, 10, bold=True)
+        self._f_badge   = _sysfont(_SANS, 14, bold=True)
+        self._f_big     = _sysfont(_SANS, 22, bold=True)
+        self._f_value   = _sysfont(_SANS, 12, bold=True)
+        self._f_label   = _sysfont(_SANS, 11)
+        self._f_small   = _sysfont(_SANS, 10)
+        self._fonts_ready = True
 
     # ── render ─────────────────────────────────────────────────────────────────
 
     def render(self, surface: pygame.Surface, ox: int, oy: int,
                stats: dict) -> None:
-        """Draw the full insights panel at offset (ox, oy)."""
-        w, h = self.width, self.height
-        panel_rect = pygame.Rect(ox, oy, w, h)
-        pygame.draw.rect(surface, PANEL_BG, panel_rect)
-        pygame.draw.rect(surface, PANEL_BORDER, panel_rect, 1)
+        self._init_fonts()
+        w, h  = self.width, self.height
+        pad   = self.PAD
+        cx    = ox + w // 2
 
-        y = oy + 8
-        cx = ox + w // 2
+        # Panel background
+        pygame.draw.rect(surface, DS["panel"], pygame.Rect(ox, oy, w, h))
+        pygame.draw.rect(surface, DS["border"], pygame.Rect(ox, oy, w, h), 1)
 
-        # ── Title ─────────────────────────────────────────────────────────────
-        self._text(surface, "AI  INSIGHTS", cx, y, self._f_title, CYAN, center=True)
-        y += 18
-        self._hline(surface, ox, y, w)
-        y += 8
+        y = oy + 10
 
-        # ── Training Stage Badge ──────────────────────────────────────────────
-        self._text(surface, "TRAINING STAGE", cx, y, self._f_label, GRAY, center=True)
-        y += 14
+        # ── Title ───────────────────────────────────────────────────────────────
+        self._text_c(surface, "AI  INSIGHTS", cx, y + 8, self._f_title, self.ACCENT)
+        y += 24
+        pygame.draw.line(surface, self.ACCENT, (ox + pad, y), (ox + w - pad, y), 2)
+        y += 10
 
+        # ── Training Stage ──────────────────────────────────────────────────────
         stage       = stats.get("stage", "Exploring")
-        stage_color = {"Exploring": ORANGE, "Learning": BLUE,
-                       "Converging": CYAN, "Converged": GREEN}.get(stage, YELLOW)
+        stage_color = {
+            "Exploring":  DS["orange"],
+            "Learning":   DS["blue"],
+            "Converging": DS["teal"],
+            "Converged":  DS["green"],
+        }.get(stage, DS["amber"])
 
-        badge_rect = pygame.Rect(ox + 10, y, w - 20, 26)
-        pygame.draw.rect(surface, tuple(max(0, c // 4) for c in stage_color), badge_rect, border_radius=5)
-        pygame.draw.rect(surface, stage_color, badge_rect, 2, border_radius=5)
-        self._text(surface, stage.upper(), cx, y + 13, self._f_badge, stage_color, center=True)
-        y += 34
+        y = self._card_block(surface, ox, y, w, pad, "TRAINING  STAGE")
+        brect = pygame.Rect(ox + pad, y, w - pad * 2, 30)
+        bg    = tuple(max(0, min(255, int(c * 0.15))) for c in stage_color)
+        pygame.draw.rect(surface, bg,          brect, border_radius=6)
+        pygame.draw.rect(surface, stage_color, brect, 2, border_radius=6)
+        self._text_c(surface, stage.upper(), cx, y + 15, self._f_badge, stage_color)
+        y += 40
 
-        # ── Training Progress Bar ──────────────────────────────────────────────
-        self._hline(surface, ox, y, w); y += 6
-        self._text(surface, "PROGRESS", ox + 8, y, self._f_label, GRAY)
-        y += 14
-
+        # ── Progress ────────────────────────────────────────────────────────────
         episode = stats.get("episode", 0)
         total   = stats.get("total_episodes", 3000)
         pct     = min(1.0, episode / max(1, total))
-        self._bar(surface, ox + 8, y, w - 16, 12, pct, BLUE, DARK_GRAY)
+
+        y = self._card_block(surface, ox, y, w, pad, "PROGRESS")
+        _accent_bar(surface, ox + pad, y, w - pad * 2, 12, DS["blue"], pct, radius=6)
         y += 14
-        self._text(surface, f"Ep {episode} / {total}  ({pct*100:.0f}%)",
-                   cx, y, self._f_small, LIGHT_GRAY, center=True)
+        self._text_c(surface, f"Ep {episode:,} / {total:,}  ({pct*100:.1f}%)",
+                     cx, y + 5, self._f_small, DS["text_sec"])
+        y += 18
+
+        # ── PU Protection ───────────────────────────────────────────────────────
+        cr       = stats.get("constraint_rate", 0.0)
+        cr_col   = DS["green"] if cr >= 0.85 else (DS["amber"] if cr >= 0.60 else DS["red"])
+
+        y = self._card_block(surface, ox, y, w, pad, "PU  PROTECTION  RATE")
+        # Big percentage display
+        big_s = self._f_big.render(f"{cr*100:.1f}%", True, cr_col)
+        surface.blit(big_s, (cx - big_s.get_width() // 2, y))
+        y += big_s.get_height() + 4
+        _accent_bar(surface, ox + pad, y, w - pad * 2, 8, cr_col, cr, radius=4)
+        y += 10
+        self._text_c(surface, f"SINR_p >= {SINR_THRESHOLD:.1f}  requirement",
+                     cx, y + 4, self._f_small, DS["text_muted"])
         y += 16
 
-        # ── PU Protection Rate ────────────────────────────────────────────────
-        self._hline(surface, ox, y, w); y += 6
-        self._text(surface, "PU PROTECTION", ox + 8, y, self._f_label, GRAY)
-        y += 14
-
-        cr = stats.get("constraint_rate", 0.0)
-        cr_color = GREEN if cr >= 0.85 else (YELLOW if cr >= 0.6 else RED)
-        self._bar(surface, ox + 8, y, w - 16, 12, cr, cr_color, DARK_GRAY)
-        y += 14
-        self._text(surface, f"{cr*100:.1f}%  of steps safe", cx, y, self._f_small,
-                   cr_color, center=True)
-        y += 12
-        self._text(surface, f"(SINR_p \u2265 {SINR_THRESHOLD:.1f} threshold)",
-                   cx, y, self._f_small, GRAY, center=True)
-        y += 16
-
-        # ── SU Throughput Stats ───────────────────────────────────────────────
-        self._hline(surface, ox, y, w); y += 6
-        self._text(surface, "SU THROUGHPUT", ox + 8, y, self._f_label, GRAY)
-        y += 14
-
-        avg_rs  = stats.get("avg_r_s", 0.0)
+        # ── SU Throughput ───────────────────────────────────────────────────────
+        avg_rs  = stats.get("avg_r_s",  0.0)
         peak_rs = stats.get("peak_r_s", 0.0)
-        self._kv(surface, ox + 8, y, "Avg this ep:", f"{avg_rs:.3f} b/s/Hz", BLUE)
-        y += 14
-        self._kv(surface, ox + 8, y, "Session peak:", f"{peak_rs:.3f} b/s/Hz", CYAN)
+
+        y = self._card_block(surface, ox, y, w, pad, "SU  THROUGHPUT")
+        big_r = self._f_big.render(f"{avg_rs:.3f}", True, DS["blue"])
+        surface.blit(big_r, (cx - big_r.get_width() // 2, y))
+        unit_s = self._f_small.render("bits/s/Hz  (current avg)", True, DS["text_muted"])
+        surface.blit(unit_s, (cx - unit_s.get_width() // 2, y + big_r.get_height() + 1))
+        y += big_r.get_height() + 14
+        self._stat_row(surface, ox + pad, y, w - pad * 2,
+                       "Session peak", f"{peak_rs:.3f}", self.ACCENT)
         y += 18
 
-        # ── Reward Trend ──────────────────────────────────────────────────────
-        self._hline(surface, ox, y, w); y += 6
-        self._text(surface, "REWARD TREND", ox + 8, y, self._f_label, GRAY)
-        y += 14
+        # ── Reward ─────────────────────────────────────────────────────────────
+        trend_raw   = stats.get("reward_trend", "[=]  Stable")
+        avg_r       = stats.get("avg_reward",  0.0)
+        best_r      = stats.get("best_reward", 0.0)
+        trend_col   = DS["green"] if "UP" in trend_raw.upper() \
+                      else (DS["red"] if "DN" in trend_raw.upper() else DS["amber"])
 
-        trend       = stats.get("reward_trend", "→ Stable")
-        trend_color = GREEN if "↑" in trend else (RED if "↓" in trend else YELLOW)
-        self._text(surface, trend, cx, y, self._f_badge, trend_color, center=True)
-        y += 16
-
-        best_r = stats.get("best_reward", 0.0)
-        avg_r  = stats.get("avg_reward", 0.0)
-        self._kv(surface, ox + 8, y, "Avg100:", f"{avg_r:+.2f}", LIGHT_GRAY)
-        y += 13
-        self._kv(surface, ox + 8, y, "Best ep:", f"{best_r:+.2f}", YELLOW)
+        y = self._card_block(surface, ox, y, w, pad, "REWARD  TREND")
+        self._text_c(surface, trend_raw, cx, y + 8, self._f_badge, trend_col)
+        y += 22
+        self._stat_row(surface, ox + pad, y, w - pad * 2,
+                       "Avg100", f"{avg_r:+.2f}", DS["text_sec"])
+        y += 15
+        self._stat_row(surface, ox + pad, y, w - pad * 2,
+                       "Best ep", f"{best_r:+.2f}", DS["amber"])
         y += 18
 
-        # ── Power Trend ───────────────────────────────────────────────────────
-        self._hline(surface, ox, y, w); y += 6
-        self._text(surface, "AVG POWER (ST)", ox + 8, y, self._f_label, GRAY)
-        y += 14
-
+        # ── Avg Power ──────────────────────────────────────────────────────────
         avg_pw  = stats.get("avg_power", 0.5)
-        pw_trend= stats.get("power_trend", "→")
-        pw_color= GREEN if "↓" in pw_trend else (RED if "↑" in pw_trend else YELLOW)
         pw_pct  = avg_pw / P_MAX
-        self._bar(surface, ox + 8, y, w - 16, 10, pw_pct,
-                  GREEN if pw_pct < 0.4 else (YELLOW if pw_pct < 0.7 else RED), DARK_GRAY)
+        pw_col  = DS["green"] if pw_pct < 0.35 else (DS["amber"] if pw_pct < 0.65 else DS["red"])
+        pw_tr   = stats.get("power_trend", "[=] Stable")
+
+        y = self._card_block(surface, ox, y, w, pad, "AVG  TRANSMIT  POWER")
+        _accent_bar(surface, ox + pad, y, w - pad * 2, 10, pw_col, pw_pct, radius=5)
         y += 12
-        self._text(surface, f"{pw_trend}  {avg_pw:.3f} W",
-                   cx, y, self._f_value, pw_color, center=True)
+        self._stat_row(surface, ox + pad, y, w - pad * 2,
+                       pw_tr, f"{avg_pw:.3f} W", pw_col)
         y += 18
 
-        # ── Violation Counter ─────────────────────────────────────────────────
-        self._hline(surface, ox, y, w); y += 6
-        self._text(surface, "VIOLATIONS (last 100)", ox + 8, y, self._f_label, GRAY)
-        y += 14
+        # ── Violations ─────────────────────────────────────────────────────────
+        viols     = stats.get("violations_last100", 0)
+        viol_pct  = viols / 100.0
+        viol_col  = DS["red"] if viol_pct > 0.3 else (DS["amber"] if viol_pct > 0.1 else DS["green"])
 
-        viols    = stats.get("violations_last100", 0)
-        viol_pct = viols / 100.0
-        viol_color = RED if viol_pct > 0.3 else (YELLOW if viol_pct > 0.1 else GREEN)
-        self._bar(surface, ox + 8, y, w - 16, 10, viol_pct, viol_color, DARK_GRAY)
+        y = self._card_block(surface, ox, y, w, pad, "PU  VIOLATIONS  /100")
+        _accent_bar(surface, ox + pad, y, w - pad * 2, 10, viol_col, viol_pct, radius=5)
         y += 12
-        self._text(surface, f"{viols}/100 steps  ({viol_pct*100:.0f}%)",
-                   cx, y, self._f_small, viol_color, center=True)
+        self._text_c(surface, f"{viols} violations  ({viol_pct*100:.0f}%)",
+                     cx, y + 4, self._f_small, viol_col)
         y += 16
 
-        # ── Policy Insight ────────────────────────────────────────────────────
-        self._hline(surface, ox, y, w); y += 6
-        self._text(surface, "POLICY INSIGHT", ox + 8, y, self._f_label, CYAN)
-        y += 14
-
+        # ── Policy Insight ──────────────────────────────────────────────────────
         insight = stats.get("policy_insight", "Initialising...")
-        y = self._wrapped_text(surface, insight, ox + 8, y, w - 16,
-                                self._f_insight, LIGHT_GRAY)
+        y = self._card_block(surface, ox, y, w, pad, "POLICY  INSIGHT")
+        y = self._wrapped_text(surface, insight, ox + pad, y,
+                               w - pad * 2, self._f_small, DS["text_sec"])
         y += 8
 
-        # ── Buffer Info ───────────────────────────────────────────────────────
-        self._hline(surface, ox, y, w); y += 6
-        buf  = stats.get("buffer_size", 0)
-        trained = stats.get("is_training", False)
-        buf_color = GREEN if trained else ORANGE
-        self._text(surface, "REPLAY BUFFER", ox + 8, y, self._f_label, GRAY)
-        y += 14
-        self._bar(surface, ox + 8, y, w - 16, 8,
-                  min(1.0, buf / 100_000), buf_color, DARK_GRAY)
-        y += 10
-        status_txt = "Training  ✓" if trained else "Filling..."
-        self._text(surface, f"{buf:,}  {status_txt}",
-                   cx, y, self._f_small, buf_color, center=True)
+        # ── Replay Buffer ───────────────────────────────────────────────────────
+        buf       = stats.get("buffer_size", 0)
+        trained   = stats.get("is_training", False)
+        buf_col   = DS["green"] if trained else DS["orange"]
+        buf_label = "[ACTIVE]" if trained else "[FILLING]"
 
-    # ── Drawing helpers ────────────────────────────────────────────────────────
+        y = self._card_block(surface, ox, y, w, pad, "REPLAY  BUFFER")
+        _accent_bar(surface, ox + pad, y, w - pad * 2, 10,
+                    buf_col, min(1.0, buf / 100_000), radius=5)
+        y += 12
+        self._text_c(surface, f"{buf:,} / 100,000   {buf_label}",
+                     cx, y + 4, self._f_small, buf_col)
 
-    def _text(self, surf, text, x, y, font, color, center=False):
-        s = font.render(text, True, color)
-        if center:
-            surf.blit(s, (x - s.get_width() // 2, y - s.get_height() // 2))
-        else:
-            surf.blit(s, (x, y))
+    # ── Helpers ────────────────────────────────────────────────────────────────
 
-    def _kv(self, surf, x, y, key, value, val_color):
-        """Key: value pair on one line."""
-        ks = self._f_small.render(key + " ", True, GRAY)
-        vs = self._f_value.render(value, True, val_color)
-        surf.blit(ks, (x, y))
-        surf.blit(vs, (x + ks.get_width(), y - 1))
+    def _card_block(self, surf: pygame.Surface,
+                    ox: int, y: int, w: int, pad: int, title: str) -> int:
+        """Draw section label with a thin accent line. Returns new y."""
+        pygame.draw.line(surf, DS["sep"], (ox + pad, y + 6), (ox + w - pad, y + 6), 1)
+        t = self._f_section.render(title, True, self.ACCENT)
+        surf.blit(t, (ox + pad, y))
+        return y + 16
 
-    def _bar(self, surf, x, y, w, h, fraction, fill_color, bg_color):
-        """Horizontal progress/fill bar."""
-        pygame.draw.rect(surf, bg_color,  (x, y, w, h), border_radius=3)
-        pygame.draw.rect(surf, PANEL_BORDER, (x, y, w, h), 1, border_radius=3)
-        fill_w = max(0, int(w * fraction))
-        if fill_w > 0:
-            pygame.draw.rect(surf, fill_color, (x, y, fill_w, h), border_radius=3)
+    def _text_c(self, surf, text, cx, cy, font, color) -> None:
+        s = font.render(str(text), True, color)
+        surf.blit(s, (cx - s.get_width() // 2, cy - s.get_height() // 2))
 
-    def _hline(self, surf, ox, y, w):
-        pygame.draw.line(surf, PANEL_BORDER, (ox + 4, y), (ox + w - 4, y), 1)
+    def _stat_row(self, surf, x, y, w, key, value, val_color) -> None:
+        key_s = self._f_label.render(key, True, DS["text_muted"])
+        val_s = self._f_value.render(value, True, val_color)
+        surf.blit(key_s, (x, y))
+        surf.blit(val_s, (x + w - val_s.get_width(), y - 1))
 
     def _wrapped_text(self, surf, text, x, y, max_w, font, color) -> int:
-        """Word-wrap text within max_w pixels. Returns final y position."""
         words = text.split()
         line  = ""
         for word in words:
@@ -663,14 +765,14 @@ class InsightsPanel:
             if font.size(test)[0] > max_w and line:
                 s = font.render(line.strip(), True, color)
                 surf.blit(s, (x, y))
-                y    += font.get_height() + 1
-                line  = word + " "
+                y   += font.get_height() + 2
+                line = word + " "
             else:
                 line = test
         if line.strip():
             s = font.render(line.strip(), True, color)
             surf.blit(s, (x, y))
-            y += font.get_height() + 1
+            y += font.get_height() + 2
         return y
 
 
@@ -679,115 +781,92 @@ class InsightsPanel:
 # =============================================================================
 
 class PygameRenderer:
-    """
-    Owns the pygame window and all sub-panels.
-    Call init() once, then update(training_state) every frame.
-    """
+    """Owns the pygame window and all sub-panels."""
 
-    # Speed options: label → steps_per_render_frame
-    SPEED_OPTIONS = [("1×", 1), ("5×", 5), ("10×", 10), ("Max", 9999)]
+    SPEED_OPTIONS = [("1x", 1), ("5x", 5), ("10x", 10), ("Max", 9999)]
 
     def __init__(self):
-        self._initialized    = False
-        self._screen         = None
-        self._clock          = None
-        self._network_panel  = None
-        self._reward_plot    = None
+        self._initialized     = False
+        self._screen          = None
+        self._network_panel   = None
+        self._reward_plot     = None
         self._throughput_plot = None
         self._sinr_plot       = None
+        self._insights_panel  = None
 
-        self._pulse_phase    = 0.0
-        self._speed_idx      = 0          # index into SPEED_OPTIONS
-        self._paused         = False
-        self._show_interf    = True
+        self._pulse_phase  = 0.0
+        self._speed_idx    = 0
+        self._paused       = False
+        self._show_interf  = True
 
-        # Button rects (set in _build_bottom_bar)
-        self._btn_pause_rect   = None
-        self._btn_reset_rect   = None
-        self._btn_interf_rect  = None
-        self._speed_btn_rects  = []
+        self._btn_pause_rect  = None
+        self._btn_reset_rect  = None
+        self._btn_interf_rect = None
+        self._speed_btn_rects = []
+        self._fonts_ready = False
 
-        # Events to report back to main loop
-        self._events_out = {
-            "quit": False, "pause_toggle": False, "reset": False,
-            "speed_change": None, "toggle_interference": False,
-        }
-
-        # Fonts (initialized in init())
-        self._font_top    = None
-        self._font_status = None
-        self._font_small  = None
-
-    # ── Initialization ─────────────────────────────────────────────────────────
+    # ── Init ───────────────────────────────────────────────────────────────────
 
     def init(self) -> None:
         pygame.init()
-        pygame.display.set_caption("CRN TD3 — Cognitive Radio Network Simulation | RIT Bangalore")
+        pygame.display.set_caption(
+            "CRN TD3 — Cognitive Radio Network  |  RIT Bangalore")
         self._screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-        self._clock  = pygame.time.Clock()
 
-        self._font_top    = pygame.font.SysFont("consolas", 13, bold=True)
-        self._font_status = pygame.font.SysFont("consolas", 12)
-        self._font_small  = pygame.font.SysFont("consolas", 11)
-        self._font_btn    = pygame.font.SysFont("consolas", 12, bold=True)
+        self._f_top   = _sysfont(_SANS, 13, bold=True)
+        self._f_small = _sysfont(_SANS, 11)
+        self._f_btn   = _sysfont(_SANS, 12, bold=True)
+        self._f_hint  = _sysfont(_SANS, 10)
 
-        # Network panel (left side)
         panel_h = WINDOW_HEIGHT - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT
         self._network_panel = NetworkPanel(LEFT_PANEL_WIDTH, panel_h)
 
-        # Right panel plots (each 1/3 of right panel height)
         plot_w = RIGHT_PANEL_WIDTH - 8
-        plot_h = (WINDOW_HEIGHT - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT) // 3
+        plot_h = panel_h // 3
 
         self._reward_plot = PlotSurface(
             width=plot_w, height=plot_h,
             title="Episode Reward",
             y_label="reward",
-            max_points=400,
-            series_colors=[GRAY, YELLOW],
+            max_points=500,
+            series_colors=[DS["text_muted"], DS["amber"]],
             series_names=["raw", "avg100"],
+            header_color=DS["amber"],
         )
         self._throughput_plot = PlotSurface(
             width=plot_w, height=plot_h,
             title="SU Throughput  R_s  [bits/s/Hz]",
             y_label="R_s",
-            max_points=400,
-            series_colors=[BLUE],
+            max_points=500,
+            series_colors=[DS["blue"]],
             series_names=["R_s"],
             y_min=0.0,
+            header_color=DS["blue"],
         )
         self._sinr_plot = PlotSurface(
             width=plot_w, height=plot_h,
-            title="PU SINR  (yellow = protection threshold)",
+            title="PU SINR  (dashed = protection threshold)",
             y_label="SINR_p",
-            max_points=400,
-            series_colors=[CYAN],
+            max_points=500,
+            series_colors=[DS["cyan"]],
             series_names=["SINR_p"],
             y_min=0.0,
             threshold=SINR_THRESHOLD,
-            threshold_color=YELLOW,
+            threshold_color=DS["amber"],
+            header_color=DS["cyan"],
         )
 
-        # AI Insights panel (far right)
         self._insights_panel = InsightsPanel(
             width=INSIGHTS_WIDTH,
-            height=WINDOW_HEIGHT - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT,
+            height=panel_h,
         )
-
         self._initialized = True
 
-    # ── Event handling ─────────────────────────────────────────────────────────
+    # ── Events ─────────────────────────────────────────────────────────────────
 
     def handle_events(self) -> dict:
-        """
-        Process pygame event queue and return a dict of actions for main loop.
-        Keys: quit, pause_toggle, reset, speed_change (int or None),
-              toggle_interference.
-        """
-        out = {
-            "quit": False, "pause_toggle": False, "reset": False,
-            "speed_change": None, "toggle_interference": False,
-        }
+        out = {"quit": False, "pause_toggle": False, "reset": False,
+               "speed_change": None, "toggle_interference": False}
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -805,22 +884,14 @@ class PygameRenderer:
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
-
-                # Pause button
                 if self._btn_pause_rect and self._btn_pause_rect.collidepoint(mx, my):
                     out["pause_toggle"] = True
                     self._paused = not self._paused
-
-                # Reset button
                 elif self._btn_reset_rect and self._btn_reset_rect.collidepoint(mx, my):
                     out["reset"] = True
-
-                # Interference toggle
                 elif self._btn_interf_rect and self._btn_interf_rect.collidepoint(mx, my):
                     out["toggle_interference"] = True
                     self._show_interf = not self._show_interf
-
-                # Speed buttons
                 else:
                     for i, rect in enumerate(self._speed_btn_rects):
                         if rect.collidepoint(mx, my):
@@ -830,43 +901,35 @@ class PygameRenderer:
 
         return out
 
-    # ── Main render call ───────────────────────────────────────────────────────
+    # ── Frame render ───────────────────────────────────────────────────────────
 
     def update(self, ts: dict) -> None:
-        """
-        Full-frame render. Call every iteration of the main loop.
-
-        ts (training_state) keys:
-            episode, step, reward, avg100, su_rate, pu_sinr, p_s,
-            sinr_p, sinr_s, r_s, exploration_noise, is_training,
-            env_state (np.ndarray or None), buffer_size, paused
-        """
         if not self._initialized:
             return
 
         screen = self._screen
-        screen.fill(BG_COLOR)
+        screen.fill(DS["bg"])
 
-        # Advance pulse animation
+        # Pulse phase
         speed_val = self.SPEED_OPTIONS[self._speed_idx][1]
-        phase_inc = 0.008 if speed_val < 10 else 0.0   # no animation at max speed
+        phase_inc = 0.009 if speed_val < 10 else 0.0
         self._pulse_phase = (self._pulse_phase + phase_inc) % 1.0
 
-        # ── Top status bar ────────────────────────────────────────────────────
+        # ── Top bar ────────────────────────────────────────────────────────────
         top_rect = pygame.Rect(0, 0, WINDOW_WIDTH, TOP_BAR_HEIGHT)
-        pygame.draw.rect(screen, PANEL_BG, top_rect)
-        pygame.draw.line(screen, PANEL_BORDER, (0, TOP_BAR_HEIGHT), (WINDOW_WIDTH, TOP_BAR_HEIGHT), 1)
+        pygame.draw.rect(screen, DS["panel"], top_rect)
+        # Accent bottom line on top bar
+        pygame.draw.line(screen, self.ACCENT if True else DS["border"],
+                         (0, TOP_BAR_HEIGHT - 1), (WINDOW_WIDTH, TOP_BAR_HEIGHT - 1), 2)
         self._draw_top_bar(screen, ts)
 
-        # ── Left panel — network visualization ───────────────────────────────
-        panel_offset = (0, TOP_BAR_HEIGHT)
+        # ── Network panel ──────────────────────────────────────────────────────
         env_state = ts.get("env_state")
         if env_state is None:
             env_state = np.zeros(7, dtype=np.float32)
-
         self._network_panel.render(
             surface=screen,
-            offset=panel_offset,
+            offset=(0, TOP_BAR_HEIGHT),
             state=env_state,
             p_s=ts.get("p_s", 0.0),
             sinr_p=ts.get("sinr_p", 0.0),
@@ -876,41 +939,29 @@ class PygameRenderer:
             show_interference=self._show_interf,
         )
 
-        # ── Right panel — live plots ──────────────────────────────────────────
-        rx = LEFT_PANEL_WIDTH + 4
-        ry = TOP_BAR_HEIGHT
+        # ── Plots ──────────────────────────────────────────────────────────────
+        rx     = LEFT_PANEL_WIDTH + 4
+        ry     = TOP_BAR_HEIGHT + 2
         plot_h = (WINDOW_HEIGHT - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT) // 3
 
-        # Push data every frame (plots handle deque size internally)
-        ep_done = ts.get("_episode_done", False)
-        if ep_done:
-            self._reward_plot.push(ts.get("reward", 0.0), ts.get("avg100", 0.0))
-
-        self._throughput_plot.push(ts.get("r_s", 0.0))
-        self._sinr_plot.push(ts.get("sinr_p", 0.0))
-
-        # Render and blit each plot
-        for i, plot in enumerate([self._reward_plot, self._throughput_plot, self._sinr_plot]):
+        for i, plot in enumerate([self._reward_plot,
+                                   self._throughput_plot,
+                                   self._sinr_plot]):
             surf = plot.render()
             screen.blit(surf, (rx, ry + i * plot_h))
-            # Separator line
             if i < 2:
-                pygame.draw.line(screen, PANEL_BORDER,
+                pygame.draw.line(screen, DS["border"],
                                  (rx, ry + (i + 1) * plot_h),
                                  (rx + RIGHT_PANEL_WIDTH - 8, ry + (i + 1) * plot_h), 1)
 
-        # Vertical separator: left | plots
-        pygame.draw.line(screen, PANEL_BORDER,
-                         (LEFT_PANEL_WIDTH, TOP_BAR_HEIGHT),
-                         (LEFT_PANEL_WIDTH, WINDOW_HEIGHT - BOTTOM_BAR_HEIGHT), 1)
+        # Vertical separators
+        for vx in [LEFT_PANEL_WIDTH, LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH]:
+            pygame.draw.line(screen, DS["border"],
+                             (vx, TOP_BAR_HEIGHT),
+                             (vx, WINDOW_HEIGHT - BOTTOM_BAR_HEIGHT), 1)
 
-        # Vertical separator: plots | insights
+        # ── Insights panel ─────────────────────────────────────────────────────
         ix = LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH
-        pygame.draw.line(screen, PANEL_BORDER,
-                         (ix, TOP_BAR_HEIGHT),
-                         (ix, WINDOW_HEIGHT - BOTTOM_BAR_HEIGHT), 1)
-
-        # ── AI Insights panel (far right) ─────────────────────────────────────
         self._insights_panel.render(
             surface=screen,
             ox=ix,
@@ -918,16 +969,22 @@ class PygameRenderer:
             stats=ts.get("insights", {}),
         )
 
-        # ── Bottom control bar ────────────────────────────────────────────────
+        # ── Bottom bar ─────────────────────────────────────────────────────────
         bot_y = WINDOW_HEIGHT - BOTTOM_BAR_HEIGHT
-        bot_rect = pygame.Rect(0, bot_y, WINDOW_WIDTH, BOTTOM_BAR_HEIGHT)
-        pygame.draw.rect(screen, PANEL_BG, bot_rect)
-        pygame.draw.line(screen, PANEL_BORDER, (0, bot_y), (WINDOW_WIDTH, bot_y), 1)
+        pygame.draw.rect(screen, DS["panel"],
+                         pygame.Rect(0, bot_y, WINDOW_WIDTH, BOTTOM_BAR_HEIGHT))
+        pygame.draw.line(screen, DS["border_hi"],
+                         (0, bot_y), (WINDOW_WIDTH, bot_y), 1)
         self._draw_bottom_bar(screen, bot_y, ts)
 
         pygame.display.flip()
 
-    # ── Top bar ───────────────────────────────────────────────────────────────
+    # Keep the accent reference accessible
+    @property
+    def ACCENT(self):
+        return DS["teal"]
+
+    # ── Top bar ────────────────────────────────────────────────────────────────
 
     def _draw_top_bar(self, screen: pygame.Surface, ts: dict) -> None:
         episode  = ts.get("episode", 0)
@@ -937,132 +994,128 @@ class PygameRenderer:
         noise    = ts.get("exploration_noise", 0.0)
         buf_size = ts.get("buffer_size", 0)
         from utils import training_status
-        from config import MIN_SAMPLES, TRAINING_EPISODES
         status = training_status(episode, buf_size, avg100)
 
-        # Status badge color
-        status_color = {
-            "Exploring": ORANGE,
-            "Learning":  BLUE,
-            "Converging": CYAN,
-            "Training":  YELLOW,
-        }.get(status, WHITE)
+        status_col = {
+            "Exploring":  DS["orange"],
+            "Learning":   DS["blue"],
+            "Converging": DS["teal"],
+            "Training":   DS["amber"],
+        }.get(status, DS["text_hi"])
 
-        y = (TOP_BAR_HEIGHT - 16) // 2
-        x = 10
+        bar_cy = TOP_BAR_HEIGHT // 2
+        x = 14
 
-        def item(label: str, value: str, color: tuple = WHITE) -> None:
+        def item(label: str, value: str, val_col: tuple = DS["text_hi"]) -> None:
             nonlocal x
-            lbl = self._font_small.render(label + ":", True, GRAY)
-            val = self._font_top.render(value, True, color)
-            screen.blit(lbl, (x, y + 2))
-            x += lbl.get_width() + 2
-            screen.blit(val, (x, y))
-            x += val.get_width() + 18
+            if x > 14:
+                pipe = self._f_small.render("|", True, DS["sep"])
+                screen.blit(pipe, (x, bar_cy - pipe.get_height() // 2))
+                x += pipe.get_width() + 8
+            lbl_s = self._f_hint.render(label, True, DS["text_muted"])
+            val_s = self._f_top.render(value, True, val_col)
+            screen.blit(lbl_s, (x, bar_cy - lbl_s.get_height() // 2 + 1))
+            x += lbl_s.get_width() + 4
+            screen.blit(val_s, (x, bar_cy - val_s.get_height() // 2))
+            x += val_s.get_width() + 8
 
-        item("Episode", f"{episode:4d}/{ts.get('total_episodes', 3000)}")
-        item("Step",    f"{step:3d}/{ts.get('steps_ep', 200)}")
-        item("Reward",  f"{reward:+.4f}", GREEN if reward >= 0 else RED)
-        item("Avg100",  f"{avg100:+.4f}", GREEN if avg100 >= 0 else ORANGE)
-        item("Noise",   f"{noise:.4f}", LIGHT_GRAY)
-        item("Buffer",  f"{buf_size:6d}", LIGHT_GRAY)
+        item("Ep",     f"{episode}/{ts.get('total_episodes', 3000)}")
+        item("Step",   f"{step}/{ts.get('steps_ep', 200)}")
+        item("Reward", f"{reward:+.4f}", DS["green"] if reward >= 0 else DS["red"])
+        item("Avg100", f"{avg100:+.4f}", DS["green"] if avg100 >= 0 else DS["orange"])
+        item("Noise",  f"{noise:.4f}", DS["text_sec"])
+        item("Buffer", f"{buf_size:,}", DS["text_sec"])
 
-        # Status badge on right
-        badge_txt = self._font_top.render(f"[ {status} ]", True, status_color)
-        screen.blit(badge_txt, (WINDOW_WIDTH - badge_txt.get_width() - 12, y))
-
-        # Paused indicator
         if ts.get("paused", False):
-            p_txt = self._font_top.render("⏸ PAUSED", True, YELLOW)
-            screen.blit(p_txt, (WINDOW_WIDTH - badge_txt.get_width() - p_txt.get_width() - 24, y))
+            p_s = self._f_top.render("PAUSED", True, DS["amber"])
+            bx  = WINDOW_WIDTH - p_s.get_width() - 120
+            screen.blit(p_s, (bx, bar_cy - p_s.get_height() // 2))
 
-    # ── Bottom bar ────────────────────────────────────────────────────────────
+        badge_s = self._f_top.render(f"[ {status.upper()} ]", True, status_col)
+        screen.blit(badge_s, (WINDOW_WIDTH - badge_s.get_width() - 14,
+                               bar_cy - badge_s.get_height() // 2))
+
+    # ── Bottom bar ─────────────────────────────────────────────────────────────
 
     def _draw_bottom_bar(self, screen: pygame.Surface, bot_y: int, ts: dict) -> None:
-        x = 10
-        cy = bot_y + BOTTOM_BAR_HEIGHT // 2
-        bh = 28
-        bw_speed = 42
+        cy  = bot_y + BOTTOM_BAR_HEIGHT // 2
+        bh  = 28
+        bw  = 46
+        x   = 14
+
+        # "SPEED" label
+        spd = self._f_hint.render("SPEED", True, DS["text_muted"])
+        screen.blit(spd, (x, cy - spd.get_height() // 2))
+        x += spd.get_width() + 8
 
         # Speed buttons
-        speed_label = self._font_small.render("Speed:", True, GRAY)
-        screen.blit(speed_label, (x, cy - speed_label.get_height() // 2))
-        x += speed_label.get_width() + 6
-
         self._speed_btn_rects = []
-        for i, (label, _) in enumerate(self.SPEED_OPTIONS):
-            rect = pygame.Rect(x, cy - bh // 2, bw_speed, bh)
+        for i, (lbl, _) in enumerate(self.SPEED_OPTIONS):
+            rect   = pygame.Rect(x, cy - bh // 2, bw, bh)
             active = (i == self._speed_idx)
-            self._draw_button(screen, rect, label, active=active)
+            self._btn(screen, rect, lbl, active=active, col=DS["blue"])
             self._speed_btn_rects.append(rect)
-            x += bw_speed + 4
-        x += 10
+            x += bw + 3
+        x += 16
 
-        # Pause / Resume
-        pause_label = "Resume" if self._paused else "Pause"
-        p_rect = pygame.Rect(x, cy - bh // 2, 70, bh)
-        self._draw_button(screen, p_rect, pause_label, active=self._paused, color=YELLOW)
+        # Divider
+        pygame.draw.line(screen, DS["border_hi"],
+                         (x, bot_y + 6), (x, bot_y + bh + 6))
+        x += 12
+
+        # Pause
+        p_lbl = "Resume" if self._paused else "Pause"
+        p_rect = pygame.Rect(x, cy - bh // 2, 74, bh)
+        self._btn(screen, p_rect, p_lbl, active=self._paused, col=DS["amber"])
         self._btn_pause_rect = p_rect
-        x += 80
+        x += 84
 
-        # Interference toggle
-        interf_label = "Interf: ON" if self._show_interf else "Interf: OFF"
-        interf_color = ORANGE if self._show_interf else GRAY
-        i_rect = pygame.Rect(x, cy - bh // 2, 90, bh)
-        self._draw_button(screen, i_rect, interf_label, active=self._show_interf, color=interf_color)
+        # Interference
+        i_lbl  = "Interf ON" if self._show_interf else "Interf OFF"
+        i_rect = pygame.Rect(x, cy - bh // 2, 88, bh)
+        self._btn(screen, i_rect, i_lbl, active=self._show_interf, col=DS["orange"])
         self._btn_interf_rect = i_rect
-        x += 100
+        x += 98
 
         # Reset
-        r_rect = pygame.Rect(x, cy - bh // 2, 60, bh)
-        self._draw_button(screen, r_rect, "Reset", active=False, color=RED)
+        r_rect = pygame.Rect(x, cy - bh // 2, 62, bh)
+        self._btn(screen, r_rect, "Reset", active=False, col=DS["red"])
         self._btn_reset_rect = r_rect
-        x += 70
+        x += 78
 
-        # Keyboard shortcuts hint
-        hint = self._font_small.render(
-            "  Space=Pause  R=Reset  I=Interference", True, DARK_GRAY
-        )
+        # Divider + hint text
+        pygame.draw.line(screen, DS["border_hi"],
+                         (x, bot_y + 6), (x, bot_y + bh + 6))
+        x += 12
+        hint = self._f_hint.render(
+            "Space = Pause     R = Reset     I = Toggle interference", True, DS["text_muted"])
         screen.blit(hint, (x, cy - hint.get_height() // 2))
 
-    def _draw_button(self, screen: pygame.Surface, rect: pygame.Rect,
-                     label: str, active: bool = False,
-                     color: tuple = BLUE) -> None:
-        """Draw a rounded-rectangle button."""
-        bg = tuple(min(255, int(c * 0.4)) for c in color) if not active else \
-             tuple(min(255, int(c * 0.7)) for c in color)
-        border_c = color
+    def _btn(self, screen: pygame.Surface, rect: pygame.Rect,
+             label: str, active: bool = False, col: tuple = None) -> None:
+        col = col or DS["blue"]
+        bg  = tuple(min(255, int(c * 0.45)) for c in col) if not active else \
+              tuple(min(255, int(c * 0.65)) for c in col)
+        pygame.draw.rect(screen, bg,  rect, border_radius=5)
+        pygame.draw.rect(screen, col, rect, 1, border_radius=5)
+        txt = self._f_btn.render(label, True,
+                                  DS["text_hi"] if active else DS["text_sec"])
+        screen.blit(txt, (rect.centerx - txt.get_width()  // 2,
+                          rect.centery - txt.get_height() // 2))
 
-        pygame.draw.rect(screen, bg,       rect, border_radius=5)
-        pygame.draw.rect(screen, border_c, rect, 1, border_radius=5)
-
-        txt = self._font_btn.render(label, True, WHITE if active else LIGHT_GRAY)
-        screen.blit(txt, (
-            rect.centerx - txt.get_width()  // 2,
-            rect.centery - txt.get_height() // 2,
-        ))
-
-    # ── Plot data management ──────────────────────────────────────────────────
+    # ── Plot data ──────────────────────────────────────────────────────────────
 
     def clear_plots(self) -> None:
-        """Reset all live plots (called on Reset)."""
-        if self._reward_plot:
-            self._reward_plot.clear()
-        if self._throughput_plot:
-            self._throughput_plot.clear()
-        if self._sinr_plot:
-            self._sinr_plot.clear()
+        for p in [self._reward_plot, self._throughput_plot, self._sinr_plot]:
+            if p:
+                p.clear()
 
     def push_episode_reward(self, raw: float, avg: float) -> None:
-        """Push per-episode reward data (call once per episode end)."""
         self._reward_plot.push(raw, avg)
 
     def push_step_data(self, r_s: float, sinr_p: float) -> None:
-        """Push per-step throughput and SINR data."""
         self._throughput_plot.push(r_s)
         self._sinr_plot.push(sinr_p)
-
-    # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def quit(self) -> None:
         pygame.quit()

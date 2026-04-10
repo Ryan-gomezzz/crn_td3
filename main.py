@@ -107,22 +107,22 @@ def main():
             second_half = list(reward_history)[len(reward_history)//2:]
             delta = sum(second_half)/len(second_half) - sum(first_half)/len(first_half)
             if delta > 5:
-                trend = "↑  Improving"
+                trend = "[+] UP  Improving"
             elif delta < -5:
-                trend = "↓  Declining"
+                trend = "[-] DN  Declining"
             else:
-                trend = "→  Stable"
+                trend = "[=]  Stable"
         else:
-            trend = "→  Collecting data"
+            trend = "[=]  Collecting data"
 
         # Power trend
         if len(power_window) >= 40:
             half = len(power_window) // 2
             pw_vals = list(power_window)
             pw_delta = sum(pw_vals[half:]) / half - sum(pw_vals[:half]) / half
-            pw_trend = "↓  Reducing" if pw_delta < -0.02 else ("↑  Increasing" if pw_delta > 0.02 else "→  Stable")
+            pw_trend = "[v] Reducing" if pw_delta < -0.02 else ("[^] Increasing" if pw_delta > 0.02 else "[=] Stable")
         else:
-            pw_trend = "→  Stable"
+            pw_trend = "[=] Stable"
 
         # Policy insight text
         if not is_training:
@@ -286,7 +286,7 @@ def main():
                     if episode > 0 and episode % SAVE_INTERVAL == 0:
                         ckpt_dir = f"./checkpoints/ep_{episode:04d}"
                         agent.save(ckpt_dir)
-                        print(f"  [Checkpoint] Saved at episode {episode} → {ckpt_dir}/")
+                        print(f"  [Checkpoint] Saved at episode {episode} -> {ckpt_dir}/")
 
                     # Update best reward and trend tracking
                     if episode_reward > best_reward[0]:

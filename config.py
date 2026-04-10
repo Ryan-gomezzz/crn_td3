@@ -36,15 +36,15 @@ LR_CRITIC           = 3e-4     # Adam learning rate for Critics
 GAMMA_DISCOUNT      = 0.99     # Discount factor for future rewards
 TAU                 = 0.005    # Soft target network update rate (Polyak averaging)
 
-TRAINING_EPISODES   = 3000     # Total training episodes
+TRAINING_EPISODES   = 3000000     # Total training episodes
 STEPS_PER_EPISODE   = 200      # Time steps per episode (channel coherence blocks)
 
 # ─── GUI / Pygame ─────────────────────────────────────────────────────────────
 WINDOW_WIDTH      = 1620
 WINDOW_HEIGHT     = 900
 LEFT_PANEL_WIDTH  = 560        # Network visualization panel
-RIGHT_PANEL_WIDTH = 820        # Live plots panel
-INSIGHTS_WIDTH    = 240        # AI Insights sidebar (far right)
+RIGHT_PANEL_WIDTH = 760        # Live plots panel
+INSIGHTS_WIDTH    = 300        # AI Insights sidebar (far right)
 TOP_BAR_HEIGHT    = 45
 BOTTOM_BAR_HEIGHT = 50
 FPS_CAP           = 60
