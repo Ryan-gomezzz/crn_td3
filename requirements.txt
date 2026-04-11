@@ -1,3 +1,9 @@
+# Core simulation
 torch>=2.0.0
 numpy>=1.24.0
-pygame>=2.3.0
+scipy>=1.11.0
+
+# Web server / WebSocket backend
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0

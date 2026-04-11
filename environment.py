@@ -4,7 +4,8 @@
 # System model:
 #   - 4 nodes: Primary Transmitter (PT), Primary Receiver (PR),
 #              Secondary Transmitter (ST), Secondary Receiver (SR)
-#   - Rayleigh fading: |h|^2 ~ Exponential(1), drawn fresh every time step
+#   - Nakagami-m fading: |h|^2 ~ Gamma(m, Omega/m), drawn fresh every time step
+#     (m=1 recovers Rayleigh/Exponential exactly)
 #   - PT transmits at fixed power P_p; ST power P_s is the TD3 action
 #   - SINR_p = (P_p * h_pp^2) / (P_s * h_sp^2 + sigma^2)
 #   - SINR_s = (P_s * h_ss^2) / (P_p * h_ps^2 + sigma^2)
@@ -18,6 +19,7 @@ from config import (
     SIGMA2, P_P, P_MAX, SINR_THRESHOLD,
     ALPHA, BETA, GAMMA_REWARD,
     STATE_DIM, STEPS_PER_EPISODE,
+    NAKAGAMI_M, NAKAGAMI_OMEGA,
 )
 
 
@@ -55,6 +57,8 @@ class CRNEnvironment:
         alpha:             float = ALPHA,
         beta:              float = BETA,
         gamma_r:           float = GAMMA_REWARD,
+        nakagami_m:        float = NAKAGAMI_M,
+        nakagami_omega:    float = NAKAGAMI_OMEGA,
         seed:              int | None = None,
     ):
         self.p_max             = p_max
@@ -65,6 +69,8 @@ class CRNEnvironment:
         self.alpha             = alpha
         self.beta              = beta
         self.gamma_r           = gamma_r
+        self.nakagami_m        = nakagami_m
+        self.nakagami_omega    = nakagami_omega
 
         # Reproducible RNG (independent of global numpy state)
         self.rng = np.random.default_rng(seed)
@@ -147,17 +153,18 @@ class CRNEnvironment:
 
     def _draw_channels(self) -> tuple[float, float, float, float]:
         """
-        Draw Rayleigh fading channel power gains.
-        |h|^2 ~ Exponential(mean=1) for each link independently.
+        Draw Nakagami-m fading channel power gains.
+        |h|^2 ~ Gamma(shape=m, scale=Omega/m) for each link independently.
+        m=1 exactly recovers Rayleigh (Exponential(Omega)).
 
         Returns: (h_pp_sq, h_sp_sq, h_ss_sq, h_ps_sq)
         """
-        h_pp_sq = float(self.rng.exponential(1.0))   # PT → PR (desired PU link)
-        h_sp_sq = float(self.rng.exponential(1.0))   # ST → PR (interference to PU)
-        h_ss_sq = float(self.rng.exponential(1.0))   # ST → SR (desired SU link)
-        h_ps_sq = float(self.rng.exponential(1.0))   # PT → SR (interference to SU)
+        scale = self.nakagami_omega / self.nakagami_m
+        h_pp_sq = float(self.rng.gamma(self.nakagami_m, scale))   # PT → PR
+        h_sp_sq = float(self.rng.gamma(self.nakagami_m, scale))   # ST → PR
+        h_ss_sq = float(self.rng.gamma(self.nakagami_m, scale))   # ST → SR
+        h_ps_sq = float(self.rng.gamma(self.nakagami_m, scale))   # PT → SR
 
-        # Cache for GUI reads
         self._h_pp_sq = h_pp_sq
         self._h_sp_sq = h_sp_sq
         self._h_ss_sq = h_ss_sq

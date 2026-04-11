@@ -1,0 +1,30 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #0a0e1a;
+  color: #d4ddf7;
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root { width: 100%; min-height: 100vh; }
+
+/* ── Animated signal packets ── */
+@keyframes pulse-ring {
+  0%   { r: 18px; opacity: 0.6; }
+  100% { r: 30px; opacity: 0; }
+}
+
+/* Interference shimmer on a dashed path */
+@keyframes dash-flow {
+  from { stroke-dashoffset: 24; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* Interference flow (reverse) */
+@keyframes dash-flow-interf {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: 24; }
+}
