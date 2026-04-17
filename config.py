@@ -7,13 +7,13 @@
 # ─── System Model ────────────────────────────────────────────────────────────
 SIGMA2 = 1e-3        # AWGN noise power at each receiver (Watts)
 P_P    = 1.0         # Primary Transmitter (PT) fixed transmit power (Watts)
-P_MAX  = 1.0         # Maximum Secondary Transmitter (ST) power (Watts)
+P_MAX  = 2.0         # Maximum Secondary Transmitter (ST) power (Watts)
 
 # ─── Reward Function Weights ─────────────────────────────────────────────────
 ALPHA         = 1.0   # Weight for SU throughput (R_s)
 BETA          = 10.0  # Penalty weight for PU SINR constraint violation
 GAMMA_REWARD  = 0.01  # Small penalty for energy usage (encourages efficiency)
-SINR_THRESHOLD = 2.0  # Minimum acceptable SINR at PR (~3 dB)
+SINR_THRESHOLD = 1.0  # Minimum acceptable SINR at PR (~0 dB)
 
 # ─── RL / TD3 Hyperparameters ─────────────────────────────────────────────────
 STATE_DIM           = 7        # [h_pp^2, h_sp^2, h_ss^2, h_ps^2, SINR_p, SINR_s, P_s_prev]
@@ -36,11 +36,11 @@ LR_CRITIC           = 3e-4     # Adam learning rate for Critics
 GAMMA_DISCOUNT      = 0.99     # Discount factor for future rewards
 TAU                 = 0.005    # Soft target network update rate (Polyak averaging)
 
-TRAINING_EPISODES   = 3000000     # Total training episodes
+TRAINING_EPISODES   = 7500     # Total training episodes
 STEPS_PER_EPISODE   = 200      # Time steps per episode (channel coherence blocks)
 
 # ─── Nakagami-m Fading Channel ───────────────────────────────────────────────
-NAKAGAMI_M     = 1.0   # Fading severity (m=1 → Rayleigh; increase for less severe fading)
+NAKAGAMI_M     = 3.0   # Fading severity (m=1 → Rayleigh; m=3 → moderate Nakagami fading)
 NAKAGAMI_OMEGA = 1.0   # Mean power per link (Ω)
 
 # ─── WebSocket / Server ───────────────────────────────────────────────────────

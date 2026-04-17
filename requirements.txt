@@ -3,6 +3,9 @@ torch>=2.0.0
 numpy>=1.24.0
 scipy>=1.11.0
 
+# Plotting and PDF report generation
+matplotlib>=3.7.0
+
 # Web server / WebSocket backend
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0

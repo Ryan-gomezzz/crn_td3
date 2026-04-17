@@ -131,3 +131,40 @@ After a successful 3000-episode training run, the key results to report are:
 3. **Adaptive power control:** Agent dynamically adjusts P_s based on channel state — mimicking the theoretical optimal power control policy
 4. **Sample efficiency:** Convergence in ~600,000 environment steps — achievable in <1 hour on CPU
 5. **No domain knowledge required:** The agent discovers the interference management strategy purely from reward signals, demonstrating the power of model-free RL for cognitive radio
+
+---
+
+## TD3 vs DDPG Comparison (PDF Report)
+
+Run `python train_compare.py` to generate the multi-page PDF report. Here is what each page tells you:
+
+### Page 2 — SINR vs BER
+
+This is the most academically significant plot. It shows:
+- **Simulated scatter points** from all steps during training (colored by algorithm)
+- **Theoretical BPSK BER curve** (AWGN, no fading) — the best possible lower bound
+- **Average BER curve** over Nakagami-m=3 fading — the expected BER after averaging over channel statistics
+- **Binned mean BER** per algorithm — shows which algorithm achieves lower BER at each SINR level
+
+**What to look for:** TD3's binned mean should fall closer to the theoretical curve than DDPG's, indicating it achieves better power control and thus lower BER at a given SINR.
+
+### Pages 3 & 4 — Throughput
+
+- **SU Throughput** (Page 3): R_s = log₂(1 + SINR_s). TD3 should achieve higher SU throughput because its twin-critic design reduces Q-value overestimation and leads to a more efficient power policy.
+- **PU Throughput** (Page 4): R_p = log₂(1 + SINR_p). Both algorithms must protect PU; a higher PU throughput indicates the SU is interfering less, which is desirable.
+
+### Page 5 — Outage Probability
+
+Outage = fraction of steps where SINR_s < threshold. As training progresses this should fall. The 5% reference line is a typical QoS target. TD3's lower-variance Q-learning should converge to a lower outage probability.
+
+### Pages 6 & 7 — Reward Curves
+
+Compare the learning speed and final reward. TD3 typically:
+- Converges faster due to twin critics reducing overestimation
+- Achieves higher final reward
+- Has smoother convergence (less oscillation)
+
+DDPG often:
+- Converges faster in early episodes (no policy delay)
+- Can overestimate Q-values, leading to instability in later training
+- May oscillate around a suboptimal policy

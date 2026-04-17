@@ -1,89 +1,92 @@
-# 02 — Channel Model: Rayleigh Fading
+# 02 — Channel Model: Nakagami-m Fading (m = 3)
 
-## What is Rayleigh Fading?
+## What is Nakagami-m Fading?
 
-In real wireless environments, a signal doesn't travel on a single straight path from transmitter to receiver. Instead, it reflects off buildings, trees, vehicles, and other objects, arriving at the receiver via **multiple paths** simultaneously — each with a different delay, phase, and amplitude. This is called **multipath propagation**.
+**Nakagami-m** is a general-purpose fading model that covers a range of fading severities with a single parameter m ≥ 0.5:
 
-**Rayleigh fading** is the statistical model used when:
-- There is **no dominant line-of-sight (LoS) path** between transmitter and receiver
-- The signal arrives via many independent scattered paths
-- The receiver sees constructive and destructive interference between these paths
+| m value | Distribution | Physical meaning |
+|---------|-------------|-----------------|
+| m = 0.5 | One-sided Gaussian | Worst-case fading |
+| **m = 1** | **Rayleigh / Exponential** | **No line-of-sight, urban scatter** |
+| m = 2 | Moderate fading | Partial LoS |
+| **m = 3** | **Mild fading** | **Strong LoS, suburban/indoor** |
+| m → ∞ | AWGN (no fading) | Ideal channel |
 
-This is the standard model for urban wireless environments, which is why it's used here.
+This project uses **m = 3**, which models a scenario with a relatively strong line-of-sight component — less volatile than pure Rayleigh (m=1) but still with significant channel variation.
 
 ---
 
 ## Mathematical Model
 
-The complex baseband channel coefficient h is modeled as:
+The **channel power gain** |h|² under Nakagami-m follows a **Gamma distribution**:
 
-$$h = h_I + j \cdot h_Q$$
+$$|h|^2 \sim \text{Gamma}\!\left(m,\; \frac{\Omega}{m}\right), \quad \mathbb{E}[|h|^2] = \Omega$$
 
-where h_I and h_Q are independent zero-mean Gaussian random variables:
+where:
+- **m = 3** — fading severity parameter (integer for closed-form BER)
+- **Ω = 1.0** — mean channel power (normalised)
 
-$$h_I, h_Q \sim \mathcal{N}\left(0, \frac{1}{2}\right)$$
+The PDF is:
 
-The **magnitude** |h| then follows a **Rayleigh distribution**, and crucially, the **channel power gain** |h|² follows an **Exponential distribution**:
+$$f(x) = \frac{m^m x^{m-1}}{\Gamma(m)\,\Omega^m} \exp\!\left(-\frac{mx}{\Omega}\right), \quad x \geq 0$$
 
-$$|h|^2 \sim \text{Exponential}(\lambda = 1) \quad \Rightarrow \quad \mathbb{E}[|h|^2] = 1$$
-
-In code, this is simply:
+In code (`environment.py`):
 
 ```python
-h_sq = np.random.exponential(1.0)   # |h|² ~ Exp(1)
+scale   = nakagami_omega / nakagami_m   # = 1.0/3.0
+h_sq    = rng.gamma(nakagami_m, scale)  # Gamma(3, 1/3) → E[h²]=1, Var=1/3
 ```
+
+With m=3 the variance of |h|² drops to Ω²/m = 1/3 (vs 1 for Rayleigh), meaning **less extreme deep fades**.
+
+---
+
+## Average BER for BPSK under Nakagami-m (m = 3)
+
+For BPSK modulation the **instantaneous** BER given SINR γ is:
+
+$$\text{BER}(\gamma) = \frac{1}{2}\,\text{erfc}\!\left(\sqrt{\gamma}\right)$$
+
+The **average** BER over Nakagami-m fading (integer m, Simon & Alouini, 2005, eq. 8.98):
+
+$$\bar{P}_b = \left(\frac{1-\mu}{2}\right)^m \sum_{k=0}^{m-1} \binom{m-1+k}{k} \left(\frac{1+\mu}{2}\right)^k, \quad \mu = \sqrt{\frac{\bar{\gamma}}{m + \bar{\gamma}}}$$
+
+where $\bar{\gamma}$ is the average SINR. This closed-form is plotted on the SINR vs BER page of the PDF report.
 
 ---
 
 ## Block Fading Model
 
-This simulation uses **block fading** — the channel remains constant for one time step (one resource block), then changes independently for the next step. This means:
+This simulation uses **block fading** — the channel is drawn fresh every time step, independently across all four links:
 
-- At each time step t, four new independent channel gains are drawn:
-  - h_pp(t), h_sp(t), h_ss(t), h_ps(t)
-- Each draw is independent of all previous draws (i.i.d. fading)
-- The agent must adapt its power P_s to each new channel realisation
+- **h_pp** — Primary Transmitter → Primary Receiver
+- **h_sp** — Secondary Transmitter → Primary Receiver  *(interference link)*
+- **h_ss** — Secondary Transmitter → Secondary Receiver *(desired SU link)*
+- **h_ps** — Primary Transmitter → Secondary Receiver  *(interference link)*
 
-This models a fast-fading environment where the coherence time equals one transmission slot — a common assumption in OFDM-based cognitive radio systems.
-
----
-
-## Why This Makes the Problem Hard
-
-Because channels change **every single time step**, the agent cannot simply memorise a fixed power level. It must learn a **policy** — a mapping from observed channel states to transmit power — that works well on average across all possible channel realisations.
-
-### Channel Statistics
-
-For a single Exponential(1) random variable:
-
-| Metric | Value |
-|--------|-------|
-| Mean E[|h|²] | 1.0 |
-| Variance Var[|h|²] | 1.0 |
-| Probability P(|h|² < 0.1) | ≈ 9.5% (deep fade) |
-| Probability P(|h|² > 3.0) | ≈ 5.0% (strong channel) |
-
-This means ~10% of the time any given link is in a **deep fade** — the channel is nearly blocked. The agent must handle these edge cases gracefully.
+At each step, four independent `Gamma(3, 1/3)` samples are drawn. The agent observes the resulting channel gains and SINRs, then chooses transmit power P_s.
 
 ---
 
-## Channel Instantiations and Their Effect
+## Nakagami-m = 3 vs Rayleigh (m = 1): Key Differences
 
-| Scenario | h_pp | h_sp | h_ss | h_ps | Optimal P_s | Reason |
-|----------|------|------|------|------|------------|--------|
-| Strong primary link, weak interference | High | Low | High | Low | High | PT→PR strong; ST can transmit powerfully without harming PU |
-| Weak h_pp, strong h_sp | Low | High | Any | Any | Very Low | Even small P_s damages PR (weak PT signal + strong ST interference) |
-| h_ss in deep fade | Any | Any | Low | Any | Low | No point transmitting; SU link is blocked anyway |
-| Ideal conditions | High | Low | High | Low | ~P_max | Maximum SU throughput while keeping PU safe |
+| Property | Rayleigh (m=1) | Nakagami-m=3 |
+|----------|---------------|--------------|
+| |h|² distribution | Exponential(1) | Gamma(3, 1/3) |
+| Mean |h|² | 1.0 | 1.0 |
+| Variance |h|² | 1.0 | **0.33** |
+| P(deep fade: |h|² < 0.1) | ≈ 9.5% | **≈ 0.2%** |
+| BER at 10 dB SNR | ≈ 5×10⁻³ | **≈ 1×10⁻⁴** |
+| Reward learning | Harder (volatile) | Smoother convergence |
 
-The TD3 agent learns to map these channel observations directly to the appropriate power level.
+The reduced variance makes the reward signal **less noisy**, so both TD3 and DDPG converge more cleanly — making algorithmic differences more visible in the comparison plots.
 
 ---
 
 ## AWGN Noise
 
-Additive White Gaussian Noise (AWGN) is present at every receiver:
+Additive White Gaussian Noise is present at every receiver:
 
-$$n \sim \mathcal{CN}(0, \sigma^2), \quad \sigma^2 = 10^{-3} \text{ W}$$
+$$n \sim \mathcal{CN}(0,\,\sigma^2), \quad \sigma^2 = 10^{-3}\text{ W}$$
 
-This ensures that even when all interference is zero (P_s = 0), there is still a noise floor. It also prevents division-by-zero in the SINR formula — the denominator is always at least σ² > 0.
+This provides a noise floor and prevents division-by-zero in SINR denominators.
