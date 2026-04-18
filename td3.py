@@ -45,16 +45,17 @@ class ReplayBuffer:
         device:     str = "cpu",
     ):
         self._max_size  = max_size
-        self._device    = device
+        self._device    = torch.device(device)
         self._ptr       = 0    # write pointer (circular)
         self._size      = 0    # number of valid entries
 
-        # Pre-allocate storage (float32 throughout)
-        self._states      = np.zeros((max_size, state_dim),  dtype=np.float32)
-        self._actions     = np.zeros((max_size, action_dim), dtype=np.float32)
-        self._rewards     = np.zeros((max_size, 1),          dtype=np.float32)
-        self._next_states = np.zeros((max_size, state_dim),  dtype=np.float32)
-        self._dones       = np.zeros((max_size, 1),          dtype=np.float32)
+        # Pre-allocate directly on target device — eliminates batch CPU->GPU
+        # transfer at sample time (only per-step single-element writes cross the bus)
+        self._states      = torch.zeros((max_size, state_dim),  dtype=torch.float32, device=self._device)
+        self._actions     = torch.zeros((max_size, action_dim), dtype=torch.float32, device=self._device)
+        self._rewards     = torch.zeros((max_size, 1),          dtype=torch.float32, device=self._device)
+        self._next_states = torch.zeros((max_size, state_dim),  dtype=torch.float32, device=self._device)
+        self._dones       = torch.zeros((max_size, 1),          dtype=torch.float32, device=self._device)
 
     def add(
         self,
@@ -64,11 +65,11 @@ class ReplayBuffer:
         next_state: np.ndarray,
         done:       bool,
     ) -> None:
-        self._states[self._ptr]      = state.astype(np.float32)
-        self._actions[self._ptr]     = action.astype(np.float32)
-        self._rewards[self._ptr]     = float(reward)
-        self._next_states[self._ptr] = next_state.astype(np.float32)
-        self._dones[self._ptr]       = float(done)
+        self._states[self._ptr]      = torch.as_tensor(state,               dtype=torch.float32)
+        self._actions[self._ptr]     = torch.as_tensor(action,              dtype=torch.float32)
+        self._rewards[self._ptr, 0]  = float(reward)
+        self._next_states[self._ptr] = torch.as_tensor(next_state,          dtype=torch.float32)
+        self._dones[self._ptr, 0]    = float(done)
 
         self._ptr  = (self._ptr + 1) % self._max_size
         self._size = min(self._size + 1, self._max_size)
@@ -76,17 +77,15 @@ class ReplayBuffer:
     def sample(self, batch_size: int = BATCH_SIZE) -> tuple[torch.Tensor, ...]:
         """
         Sample a random mini-batch.
-        Returns (states, actions, rewards, next_states, dones) as float32 tensors.
+        Tensors are already on device — no transfer overhead.
         """
-        idx = np.random.randint(0, self._size, size=batch_size)
-        to_t = lambda arr: torch.FloatTensor(arr[idx]).to(self._device)
-
+        idx = torch.randint(0, self._size, (batch_size,), device=self._device)
         return (
-            to_t(self._states),
-            to_t(self._actions),
-            to_t(self._rewards),
-            to_t(self._next_states),
-            to_t(self._dones),
+            self._states[idx],
+            self._actions[idx],
+            self._rewards[idx],
+            self._next_states[idx],
+            self._dones[idx],
         )
 
     def __len__(self) -> int:

@@ -43,6 +43,7 @@ from config import (
     REPLAY_BUFFER_SIZE, MIN_SAMPLES,
     EXPLORATION_NOISE_STD, EXPLORATION_NOISE_END,
     BATCH_SIZE, SINR_THRESHOLD, NAKAGAMI_M, NAKAGAMI_OMEGA,
+    GRAD_UPDATES_PER_STEP,
 )
 from environment import CRNEnvironment
 from td3  import TD3Agent,  ReplayBuffer
@@ -266,9 +267,11 @@ def run_algorithm(
             ep_reward += result.reward
             state      = result.state
 
-            # Train
+            # Train — GRAD_UPDATES_PER_STEP gradient steps per env step
+            # keeps GPU utilization high despite small network size
             if buffer.is_ready:
-                agent.train_step(buffer, BATCH_SIZE)
+                for _ in range(GRAD_UPDATES_PER_STEP):
+                    agent.train_step(buffer, BATCH_SIZE)
 
         # End of episode aggregation
         noise_sched.step()
@@ -706,6 +709,11 @@ def main() -> None:
     # Reproducibility
     np.random.seed(args.seed)
     import torch; torch.manual_seed(args.seed)
+
+    # GPU speed: enable TF32 on Ampere/Ada GPUs (RTX 30xx/40xx) — uses tensor
+    # cores for matmul with negligible precision loss, ~1.5-2x faster on MLPs
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32       = True
 
     checkpoint_dir = os.path.dirname(args.output) if os.path.dirname(args.output) else "results"
 
