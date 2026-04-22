@@ -18,6 +18,8 @@
 | [06](06_training_process.md) | **Training Process** | Phases, exploration schedule, checkpointing |
 | [07](07_gui_guide.md) | **GUI Guide** | Panel layout, link colours, controls reference |
 | [08](08_results_interpretation.md) | **Results** | How to read plots, expected training curve, diagnostics |
+| [09](09_camo_td3.md) | **CAMO-TD3 Algorithm** | Constrained Adaptive Multi-Objective TD3 — GRU belief encoder, decomposed critics, adaptive Lagrangian |
+| [10](10_camo_td3_methodology.md) | **CAMO-TD3 Methodology** | Full methodology: problem, formulation, parameter reasoning, why better than TD3/DDPG (for reports/reviews) |
 | [KAGGLE_GUIDE](KAGGLE_GUIDE.md) | **Kaggle Guide** | Step-by-step notebook setup, GPU tips, troubleshooting |
 
 ---
@@ -60,10 +62,21 @@ Actor updated every step (no policy delay)
 Ornstein-Uhlenbeck exploration noise
 ```
 
+### CAMO-TD3 Key Additions vs TD3
+```
+GRU Belief Encoder: 2-layer GRU, seq_len=8, belief_dim=16
+6 Critics: twin critics for throughput, interference, energy
+Adaptive Lagrangian: lambda_1=1.0, lambda_2=10.0, lambda_3=0.01
+Directional Noise: mu_bias=-0.15, decays over 200k steps
+```
+
 ### Comparison Script
 ```bash
-# Train both algorithms and generate PDF report
+# Train TD3 + DDPG and generate PDF report
 python train_compare.py --episodes 500 --output results/report.pdf
+
+# Train all three (TD3 + DDPG + CAMO-TD3)
+python train_compare.py --agents td3,ddpg,camo-td3 --episodes 1500 --output results/report_3way.pdf
 
 # TD3 only (quick smoke-test)
 python train_compare.py --episodes 100 --no-ddpg --output results/td3_only.pdf

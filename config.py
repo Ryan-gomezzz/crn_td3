@@ -31,7 +31,7 @@ EXPLORATION_NOISE_STD = 0.1    # Initial exploration noise std (fraction of P_MA
 EXPLORATION_NOISE_END = 0.01   # Final exploration noise std (fraction of P_MAX)
 
 BATCH_SIZE          = 256      # Mini-batch size for gradient updates
-GRAD_UPDATES_PER_STEP = 4     # Gradient updates per env step (UTD ratio) — keeps GPU busy
+GRAD_UPDATES_PER_STEP = 2     # Gradient updates per env step (UTD ratio) — keeps GPU busy
 LR_ACTOR            = 3e-4     # Adam learning rate for Actor
 LR_CRITIC           = 3e-4     # Adam learning rate for Critics
 GAMMA_DISCOUNT      = 0.99     # Discount factor for future rewards
@@ -43,6 +43,25 @@ STEPS_PER_EPISODE   = 200      # Time steps per episode (channel coherence block
 # ─── Nakagami-m Fading Channel ───────────────────────────────────────────────
 NAKAGAMI_M     = 3.0   # Fading severity (m=1 → Rayleigh; m=3 → moderate Nakagami fading)
 NAKAGAMI_OMEGA = 1.0   # Mean power per link (Ω)
+
+# ─── CAMO-TD3 (Constrained Adaptive Multi-Objective TD3) ─────────────────
+GRU_HIDDEN_SIZE    = 64       # GRU hidden state width
+GRU_NUM_LAYERS     = 2        # Number of GRU layers
+BELIEF_DIM         = 16       # Compressed belief vector dimension
+SEQ_LEN            = 8        # Observation history length for GRU encoder
+
+LAMBDA1_INIT       = 3.0      # Initial Lagrangian weight for throughput objective
+LAMBDA2_INIT       = 1.0      # Initial Lagrangian weight for interference constraint
+LAMBDA3_INIT       = 0.01     # Initial Lagrangian weight for energy objective
+LR_LAMBDA          = 0.0005   # Learning rate for Lagrangian multiplier updates
+LAMBDA_MIN         = 0.1      # Floor: prevents any objective from being ignored
+LAMBDA_MAX         = 20.0     # Ceiling: prevents runaway constraint weighting
+
+MU_BIAS_INIT       = -0.05    # Directional noise bias (negative = lower power to protect PU)
+NOISE_DECAY_STEPS  = 200_000  # Steps over which directional noise decays
+VIOLATION_WINDOW   = 100      # Rolling window for constraint violation tracking
+
+CAMO_HIDDEN_DIM    = 512      # Width of hidden layers in CAMO Actor and Critics
 
 # ─── WebSocket / Server ───────────────────────────────────────────────────────
 WS_HOST            = "0.0.0.0"
