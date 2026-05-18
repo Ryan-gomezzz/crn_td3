@@ -44,6 +44,22 @@ STEPS_PER_EPISODE   = 200      # Time steps per episode (channel coherence block
 NAKAGAMI_M     = 3.0   # Fading severity (m=1 → Rayleigh; m=3 → moderate Nakagami fading)
 NAKAGAMI_OMEGA = 1.0   # Mean power per link (Ω)
 
+# ─── Imperfect CSI Model ─────────────────────────────────────────────────────
+# Realistic CRN setting: the SU only sees noisy/delayed estimates of the channel
+# gains (pilot estimation error + feedback delay + quantization). The true gains
+# are still used by the physics to compute SINR and reward — the agent must act
+# on degraded observations.
+#
+#   ĥ²_obs  = (1 - rho) * h²_true_{t-D} + rho * h²_true_t  +  N(0, (sigma_csi · h²)²)
+#   then clipped to ≥ 0
+#
+# Set IMPERFECT_CSI = False to recover the original perfect-CSI environment.
+IMPERFECT_CSI       = True
+CSI_NOISE_STD       = 0.15   # Relative estimation-error std (15% of true gain)
+CSI_DELAY_STEPS     = 1      # Feedback delay in steps (0 = no delay)
+CSI_DELAY_RHO       = 0.7    # Temporal correlation of delayed estimate (1=instant, 0=fully stale)
+CSI_QUANT_BITS      = 0      # Quantization bits for fed-back gain (0 = no quantization)
+
 # ─── CAMO-TD3 (Constrained Adaptive Multi-Objective TD3) ─────────────────
 GRU_HIDDEN_SIZE    = 64       # GRU hidden state width
 GRU_NUM_LAYERS     = 2        # Number of GRU layers

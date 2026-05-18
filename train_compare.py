@@ -333,6 +333,7 @@ def run_algorithm(
     verbose:         bool = True,
     checkpoint_every: int = 0,
     checkpoint_dir:  str  = "results",
+    nakagami_m:      float = NAKAGAMI_M,
 ) -> RunMetrics:
     """
     Train `agent` for `n_episodes` episodes and collect metrics.
@@ -349,7 +350,7 @@ def run_algorithm(
     """
     metrics = RunMetrics(name=algo_name)
 
-    env = CRNEnvironment(steps_per_episode=steps_per_ep)
+    env = CRNEnvironment(steps_per_episode=steps_per_ep, nakagami_m=nakagami_m)
     buffer = ReplayBuffer(
         state_dim=STATE_DIM,
         action_dim=ACTION_DIM,
@@ -376,7 +377,7 @@ def run_algorithm(
         print("=" * 68)
         print(f"  [{algo_name}] Starting training   "
               f"episodes={n_episodes}  steps/ep={steps_per_ep}  "
-              f"Nakagami-m={NAKAGAMI_M}")
+              f"Nakagami-m={nakagami_m}")
         print(f"  Device: {agent.device}")
         print("=" * 68)
 
@@ -503,15 +504,17 @@ def run_camo_algorithm(
     verbose:         bool = True,
     checkpoint_every: int = 0,
     checkpoint_dir:  str  = "results",
+    nakagami_m:      float = NAKAGAMI_M,
+    algo_label:      str   = "CAMO-TD3",
 ) -> RunMetrics:
     """
     Train CAMO-TD3 agent. Same metric collection as run_algorithm but uses
     the SequenceReplayBuffer and decomposed reward storage.
     """
-    algo_name = "CAMO-TD3"
+    algo_name = algo_label
     metrics = RunMetrics(name=algo_name)
 
-    env = CRNEnvironment(steps_per_episode=steps_per_ep)
+    env = CRNEnvironment(steps_per_episode=steps_per_ep, nakagami_m=nakagami_m)
     buffer = SequenceReplayBuffer(
         state_dim=STATE_DIM,
         action_dim=ACTION_DIM,
@@ -535,9 +538,15 @@ def run_camo_algorithm(
         print("=" * 68)
         print(f"  [{algo_name}] Starting training   "
               f"episodes={n_episodes}  steps/ep={steps_per_ep}  "
-              f"Nakagami-m={NAKAGAMI_M}")
+              f"Nakagami-m={nakagami_m}")
         print(f"  Device: {agent.device}")
-        print(f"  Components: GRU Belief Encoder + 6 Critics + Adaptive Lagrangian")
+        comp_flags = (
+            f"multi-obj={agent.use_multi_objective}, "
+            f"adaptive-lambda={agent.use_adaptive_lambda}, "
+            f"gru={agent.use_gru_belief}, "
+            f"directional={agent.use_directional_noise}"
+        )
+        print(f"  Components: {comp_flags}")
         print("=" * 68)
 
     for ep in range(n_episodes):
@@ -718,6 +727,7 @@ def generate_pdf(
     steps_per_ep: int,
     # Legacy 2-arg signature support: generate_pdf(td3_m, ddpg_m, path, ...)
     _legacy_ddpg: "RunMetrics | None" = None,
+    nakagami_m:   float = NAKAGAMI_M,
 ) -> None:
     """
     Render all plots to a multi-page PDF report.
@@ -755,7 +765,11 @@ def generate_pdf(
     algo_names = " vs ".join(m.name for m in all_metrics)
 
     def _color_for(m):
-        return ALGO_COLORS.get(m.name, "#555555")
+        # Prefix-match so labels like "CAMO-TD3-MultiObjOnly" still get the right color
+        for key, c in ALGO_COLORS.items():
+            if m.name.startswith(key):
+                return c
+        return "#555555"
 
     def _binned_mean(x_pts, y_pts, lo=-5, hi=25, n_bins=25):
         """Compute binned means for scatter overlay."""
@@ -784,7 +798,7 @@ def generate_pdf(
         fig.text(0.5, 0.88, title_txt, ha="center", va="top",
                  fontsize=18, fontweight="bold")
         fig.text(0.5, 0.80,
-                 f"Nakagami-m = {NAKAGAMI_M}  |  Episodes = {n_episodes}  |  "
+                 f"Nakagami-m = {nakagami_m}  |  Episodes = {n_episodes}  |  "
                  f"Steps/Episode = {steps_per_ep}  |  SINR Threshold = {SINR_THRESHOLD} dB",
                  ha="center", va="top", fontsize=11, color="#444444")
 
@@ -855,9 +869,9 @@ def generate_pdf(
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.semilogy(snr_range, theoretical_bpsk_ber(snr_range),
                     "k--", linewidth=1.4, label="BPSK Theoretical (AWGN)", alpha=0.7)
-        ax.semilogy(snr_range, nakagami_avg_ber_bpsk(snr_range, NAKAGAMI_M),
+        ax.semilogy(snr_range, nakagami_avg_ber_bpsk(snr_range, nakagami_m),
                     "k-.", linewidth=1.4,
-                    label=f"BPSK Avg BER (Nakagami-m={int(NAKAGAMI_M)})", alpha=0.7)
+                    label=f"BPSK Avg BER (Nakagami-m={nakagami_m:g})", alpha=0.7)
 
         for m_obj in all_metrics:
             color = _color_for(m_obj)
@@ -872,7 +886,7 @@ def generate_pdf(
         ax.set_xlabel("SINR (dB)")
         ax.set_ylabel("Bit Error Rate (BER)")
         ax.set_title(
-            f"SINR vs BER - Nakagami-m={int(NAKAGAMI_M)} Fading Channel\n"
+            f"SINR vs BER - Nakagami-m={nakagami_m:g} Fading Channel\n"
             f"(BPSK Modulation, Secondary User)"
         )
         ax.set_xlim(-5, 25); ax.set_ylim(1e-6, 0.6)
@@ -885,9 +899,9 @@ def generate_pdf(
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.semilogy(snr_range, theoretical_bpsk_ber(snr_range),
                     "k--", linewidth=1.4, label="BPSK Theoretical (AWGN)", alpha=0.7)
-        ax.semilogy(snr_range, nakagami_avg_ber_bpsk(snr_range, NAKAGAMI_M),
+        ax.semilogy(snr_range, nakagami_avg_ber_bpsk(snr_range, nakagami_m),
                     "k-.", linewidth=1.4,
-                    label=f"BPSK Avg BER (Nakagami-m={int(NAKAGAMI_M)})", alpha=0.7)
+                    label=f"BPSK Avg BER (Nakagami-m={nakagami_m:g})", alpha=0.7)
 
         for m_obj in all_metrics:
             color = _color_for(m_obj)
@@ -904,7 +918,7 @@ def generate_pdf(
         ax.set_xlabel("PU SINR (dB)")
         ax.set_ylabel("Bit Error Rate (BER)")
         ax.set_title(
-            f"Primary User SINR vs BER - Nakagami-m={int(NAKAGAMI_M)} Fading Channel\n"
+            f"Primary User SINR vs BER - Nakagami-m={nakagami_m:g} Fading Channel\n"
             f"(BPSK Modulation | Effect of SU Interference)"
         )
         ax.set_xlim(-5, 25); ax.set_ylim(1e-6, 0.6)
@@ -960,6 +974,84 @@ def generate_pdf(
         fig.tight_layout(); pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
         # ══════════════════════════════════════════════════════════════════════
+        # PAGE 6b — Outage Probability vs SINR Threshold (empirical CDF sweep)
+        # ──────────────────────────────────────────────────────────────────────
+        # For each algo, plot P(SINR_s < gamma) over a sweep of gamma in dB.
+        # Lower curve = better (less likely to fall below any given threshold).
+        # ══════════════════════════════════════════════════════════════════════
+        fig, (ax_su, ax_pu) = plt.subplots(1, 2, figsize=(12, 5.5))
+        gamma_db_sweep = np.linspace(-5.0, 25.0, 121)
+
+        for ax_cur, attr_name, recv_label in [
+            (ax_su, "sinr_db_pts",    "Secondary"),
+            (ax_pu, "pu_sinr_db_pts", "Primary"),
+        ]:
+            for m_obj in all_metrics:
+                pts = np.asarray(getattr(m_obj, attr_name), dtype=float)
+                if pts.size == 0:
+                    continue
+                # Empirical outage: fraction of samples below each threshold
+                outage_curve = np.array([(pts < g).mean() for g in gamma_db_sweep])
+                ax_cur.semilogy(gamma_db_sweep, np.clip(outage_curve, 1e-5, 1.0),
+                                color=_color_for(m_obj), linewidth=2.0,
+                                label=f"{m_obj.name}")
+
+            ax_cur.axvline(x=10*np.log10(SINR_THRESHOLD), color="green", ls="--",
+                           lw=1.3, label=f"PU Threshold ({10*np.log10(SINR_THRESHOLD):.1f} dB)")
+            ax_cur.axhline(y=0.05, color="gray", ls=":", lw=1.0, label="5% target")
+            ax_cur.set_xlabel(f"{recv_label} SINR Threshold $\\gamma$ (dB)")
+            ax_cur.set_ylabel(r"Outage Probability  $P(\mathrm{SINR} < \gamma)$")
+            ax_cur.set_title(f"{recv_label} User: Outage vs SINR Threshold")
+            ax_cur.set_xlim(-5, 25); ax_cur.set_ylim(1e-4, 1.0)
+            ax_cur.grid(True, which="both", alpha=0.3)
+            ax_cur.legend(loc="lower right", fontsize=9)
+
+        fig.suptitle("Outage Probability vs SINR Threshold (Empirical CDF) "
+                     "— Imperfect CSI", fontsize=13, y=1.02)
+        fig.tight_layout(); pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # PAGE 6c — BER vs SINR (clean combined comparison, all algorithms)
+        # ──────────────────────────────────────────────────────────────────────
+        # Mean simulated BER per SINR bin for SU and PU side-by-side.
+        # Lower curve = better link quality at a given operating SINR.
+        # ══════════════════════════════════════════════════════════════════════
+        fig, (ax_su, ax_pu) = plt.subplots(1, 2, figsize=(12, 5.5))
+        snr_ref = np.linspace(-5, 25, 200)
+
+        for ax_cur, sinr_attr, ber_attr, recv_label in [
+            (ax_su, "sinr_db_pts",    "ber_pts",    "Secondary"),
+            (ax_pu, "pu_sinr_db_pts", "pu_ber_pts", "Primary"),
+        ]:
+            ax_cur.semilogy(snr_ref, theoretical_bpsk_ber(snr_ref),
+                            "k--", lw=1.3, alpha=0.6, label="BPSK AWGN (theory)")
+            ax_cur.semilogy(snr_ref, nakagami_avg_ber_bpsk(snr_ref, nakagami_m),
+                            "k-.", lw=1.3, alpha=0.6,
+                            label=f"BPSK Nakagami-m={nakagami_m:g} (theory)")
+
+            for m_obj in all_metrics:
+                sinr_pts = getattr(m_obj, sinr_attr)
+                ber_pts_ = getattr(m_obj, ber_attr)
+                if not sinr_pts:
+                    continue
+                bx, by = _binned_mean(sinr_pts, ber_pts_)
+                if bx:
+                    ax_cur.semilogy(bx, by, color=_color_for(m_obj),
+                                    linewidth=2.2, marker="o", markersize=4,
+                                    label=f"{m_obj.name} (simulated)")
+
+            ax_cur.set_xlabel(f"{recv_label} SINR (dB)")
+            ax_cur.set_ylabel("Mean Bit Error Rate (BER)")
+            ax_cur.set_title(f"{recv_label} User: BER vs SINR")
+            ax_cur.set_xlim(-5, 25); ax_cur.set_ylim(1e-6, 0.6)
+            ax_cur.grid(True, which="both", alpha=0.3)
+            ax_cur.legend(loc="lower left", fontsize=9)
+
+        fig.suptitle("BER vs SINR — Algorithm Comparison under Imperfect CSI",
+                     fontsize=13, y=1.02)
+        fig.tight_layout(); pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+
+        # ══════════════════════════════════════════════════════════════════════
         # PAGE 7 — Individual Reward Curves
         # ══════════════════════════════════════════════════════════════════════
         n_algos = len(all_metrics)
@@ -999,7 +1091,7 @@ def generate_pdf(
         d = pdf.infodict()
         d["Title"]   = f"CRN {algo_names} Comparison Report"
         d["Author"]  = "Ramaiah Institute of Technology"
-        d["Subject"] = f"Nakagami-m={NAKAGAMI_M} CRN Power Allocation via RL"
+        d["Subject"] = f"Nakagami-m={nakagami_m:g} CRN Power Allocation via RL"
 
     print(f"\n  PDF report saved: {os.path.abspath(output_path)}")
 
@@ -1031,10 +1123,41 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--agents", type=str, default=None,
                    help="Comma-separated list of agents to train: td3,ddpg,camo-td3  "
                         "(default: td3,ddpg — overrides --no-ddpg)")
+    p.add_argument("--device", type=str, default="auto",
+                   choices=["auto", "cuda", "cpu"],
+                   help="Force compute device. 'auto' picks CUDA if available; "
+                        "'cuda' fails fast if no GPU is detected (default: auto)")
+    p.add_argument("--nakagami-m", type=float, default=NAKAGAMI_M,
+                   help=f"Nakagami fading severity m (default {NAKAGAMI_M}; "
+                        f"m=1 -> Rayleigh, m=2/3 -> moderate fading)")
+    p.add_argument("--camo-variant", type=str, default="full",
+                   choices=["full", "none",
+                            "multi-obj-only", "lambda-only",
+                            "gru-only", "directional-only"],
+                   help="CAMO-TD3 ablation variant. 'full'=all 4 components, "
+                        "'none'=architecture only with all components off, "
+                        "'multi-obj-only' / 'lambda-only' / 'gru-only' / "
+                        "'directional-only'=enable just one component.")
+    p.add_argument("--label-suffix", type=str, default="",
+                   help="Suffix appended to CAMO-TD3 label in plots/PDF "
+                        "(e.g. '-MultiObj' for ablation runs)")
     return p.parse_args()
 
 
-def _train_worker(algo_name, n_episodes, steps_per_ep, checkpoint_every, checkpoint_dir, seed):
+_CAMO_VARIANT_FLAGS = {
+    # variant : (multi_obj, adaptive_lambda, gru, directional)
+    "full":             (True,  True,  True,  True),
+    "none":             (False, False, False, False),
+    "multi-obj-only":   (True,  False, False, False),
+    "lambda-only":      (True,  True,  False, False),  # lambda needs multi-obj
+    "gru-only":         (False, False, True,  False),
+    "directional-only": (False, False, False, True),
+}
+
+
+def _train_worker(algo_name, n_episodes, steps_per_ep, checkpoint_every,
+                  checkpoint_dir, seed, device, nakagami_m,
+                  camo_variant, camo_label):
     """Worker function for parallel training (runs in a separate process)."""
     import torch
     np.random.seed(seed)
@@ -1043,17 +1166,31 @@ def _train_worker(algo_name, n_episodes, steps_per_ep, checkpoint_every, checkpo
     torch.backends.cudnn.allow_tf32       = True
 
     if algo_name == "TD3":
-        agent = TD3Agent()
+        agent = TD3Agent(device=device)
         return run_algorithm("TD3", agent, n_episodes, steps_per_ep,
-                             checkpoint_every=checkpoint_every, checkpoint_dir=checkpoint_dir)
+                             checkpoint_every=checkpoint_every,
+                             checkpoint_dir=checkpoint_dir,
+                             nakagami_m=nakagami_m)
     elif algo_name == "DDPG":
-        agent = DDPGAgent()
+        agent = DDPGAgent(device=device)
         return run_algorithm("DDPG", agent, n_episodes, steps_per_ep,
-                             checkpoint_every=checkpoint_every, checkpoint_dir=checkpoint_dir)
+                             checkpoint_every=checkpoint_every,
+                             checkpoint_dir=checkpoint_dir,
+                             nakagami_m=nakagami_m)
     elif algo_name == "CAMO-TD3":
-        agent = CAMO_TD3Agent()
+        mo, al, gr, dn = _CAMO_VARIANT_FLAGS[camo_variant]
+        agent = CAMO_TD3Agent(
+            device=device,
+            use_multi_objective=mo,
+            use_adaptive_lambda=al,
+            use_gru_belief=gr,
+            use_directional_noise=dn,
+        )
         return run_camo_algorithm(agent, n_episodes, steps_per_ep,
-                                  checkpoint_every=checkpoint_every, checkpoint_dir=checkpoint_dir)
+                                  checkpoint_every=checkpoint_every,
+                                  checkpoint_dir=checkpoint_dir,
+                                  nakagami_m=nakagami_m,
+                                  algo_label=camo_label)
     else:
         raise ValueError(f"Unknown algorithm: {algo_name}")
 
@@ -1085,12 +1222,58 @@ def main() -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32       = True
 
+    # ── Resolve compute device explicitly (and fail fast if cuda requested but missing)
+    cuda_ok = torch.cuda.is_available()
+    if args.device == "cuda":
+        if not cuda_ok:
+            print("\n  ERROR: --device cuda requested but torch.cuda.is_available() is False.")
+            print(f"         torch={torch.__version__}  cuda_built={torch.version.cuda}")
+            print( "         Install a CUDA build of torch, e.g.:")
+            print( "           pip install --index-url https://download.pytorch.org/whl/cu121 "
+                   "torch torchvision torchaudio")
+            sys.exit(2)
+        resolved_device = "cuda"
+    elif args.device == "cpu":
+        resolved_device = "cpu"
+    else:  # auto
+        resolved_device = "cuda" if cuda_ok else "cpu"
+
+    if resolved_device == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        print(f"\n  Compute device: cuda  ({gpu_name})")
+    else:
+        print(f"\n  Compute device: cpu  (cuda_available={cuda_ok}, "
+              f"torch={torch.__version__}, cuda_built={torch.version.cuda})")
+
     checkpoint_dir = os.path.dirname(args.output) if os.path.dirname(args.output) else "results"
+
+    # Build CAMO-TD3 display label (so ablation runs show e.g. "CAMO-TD3-MultiObjOnly")
+    camo_label = "CAMO-TD3"
+    if args.camo_variant != "full":
+        suffix_default = {
+            "none":             "-None",
+            "multi-obj-only":   "-MultiObjOnly",
+            "lambda-only":      "-LambdaOnly",
+            "gru-only":         "-GRUOnly",
+            "directional-only": "-DirOnly",
+        }.get(args.camo_variant, "")
+        camo_label = "CAMO-TD3" + (args.label_suffix or suffix_default)
+    elif args.label_suffix:
+        camo_label = "CAMO-TD3" + args.label_suffix
+
+    # Update the display name for camo-td3 runs everywhere downstream
+    if "camo-td3" in agent_list:
+        idx = agent_display.index("CAMO-TD3")
+        agent_display[idx] = camo_label
 
     print("\n" + "=" * 68)
     print(f"  CRN {' vs '.join(agent_display)} -- Comparison Training & Report Generator")
-    print(f"  Nakagami-m = {NAKAGAMI_M}  |  Episodes = {args.episodes}"
+    print(f"  Nakagami-m = {args.nakagami_m}  |  Episodes = {args.episodes}"
           f"  |  Steps/ep = {args.steps_per_ep}")
+    if "camo-td3" in agent_list:
+        mo, al, gr, dn = _CAMO_VARIANT_FLAGS[args.camo_variant]
+        print(f"  CAMO variant: {args.camo_variant}  "
+              f"(multi-obj={mo}, adaptive-lambda={al}, gru={gr}, directional={dn})")
     if args.checkpoint_every > 0:
         print(f"  Checkpoint graphs every {args.checkpoint_every} episodes -> {checkpoint_dir}/")
     if args.parallel and len(agent_list) > 1:
@@ -1109,9 +1292,13 @@ def main() -> None:
         with ProcessPoolExecutor(max_workers=len(agent_list)) as pool:
             futures = {}
             for i, name in enumerate(agent_display):
-                f = pool.submit(_train_worker, name, args.episodes,
+                # `name` may be the CAMO-TD3 display label (e.g. "CAMO-TD3-MultiObjOnly").
+                # The worker uses canonical names; pass canonical name + label separately.
+                canonical = "CAMO-TD3" if name.startswith("CAMO-TD3") else name
+                f = pool.submit(_train_worker, canonical, args.episodes,
                                 args.steps_per_ep, args.checkpoint_every,
-                                checkpoint_dir, args.seed + i)
+                                checkpoint_dir, args.seed + i, resolved_device,
+                                args.nakagami_m, args.camo_variant, name)
                 futures[name] = f
 
             for name in agent_display:
@@ -1126,20 +1313,31 @@ def main() -> None:
             import torch; torch.manual_seed(seed_i)
 
             if algo_key == "td3":
-                agent = TD3Agent()
+                agent = TD3Agent(device=resolved_device)
                 m = run_algorithm("TD3", agent, args.episodes, args.steps_per_ep,
                                   checkpoint_every=args.checkpoint_every,
-                                  checkpoint_dir=checkpoint_dir)
+                                  checkpoint_dir=checkpoint_dir,
+                                  nakagami_m=args.nakagami_m)
             elif algo_key == "ddpg":
-                agent = DDPGAgent()
+                agent = DDPGAgent(device=resolved_device)
                 m = run_algorithm("DDPG", agent, args.episodes, args.steps_per_ep,
                                   checkpoint_every=args.checkpoint_every,
-                                  checkpoint_dir=checkpoint_dir)
+                                  checkpoint_dir=checkpoint_dir,
+                                  nakagami_m=args.nakagami_m)
             elif algo_key == "camo-td3":
-                agent = CAMO_TD3Agent()
+                mo, al, gr, dn = _CAMO_VARIANT_FLAGS[args.camo_variant]
+                agent = CAMO_TD3Agent(
+                    device=resolved_device,
+                    use_multi_objective=mo,
+                    use_adaptive_lambda=al,
+                    use_gru_belief=gr,
+                    use_directional_noise=dn,
+                )
                 m = run_camo_algorithm(agent, args.episodes, args.steps_per_ep,
                                        checkpoint_every=args.checkpoint_every,
-                                       checkpoint_dir=checkpoint_dir)
+                                       checkpoint_dir=checkpoint_dir,
+                                       nakagami_m=args.nakagami_m,
+                                       algo_label=camo_label)
             all_metrics.append(m)
 
     # ── Generate PDF ───────────────────────────────────────────────────────────
@@ -1149,6 +1347,7 @@ def main() -> None:
         output_path  = args.output,
         n_episodes   = args.episodes,
         steps_per_ep = args.steps_per_ep,
+        nakagami_m   = args.nakagami_m,
     )
 
     print("\n  All done!")

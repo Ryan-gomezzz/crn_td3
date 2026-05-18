@@ -14,12 +14,14 @@
 
 from __future__ import annotations
 import numpy as np
+from collections import deque
 from dataclasses import dataclass, field
 from config import (
     SIGMA2, P_P, P_MAX, SINR_THRESHOLD,
     ALPHA, BETA, GAMMA_REWARD,
     STATE_DIM, STEPS_PER_EPISODE,
     NAKAGAMI_M, NAKAGAMI_OMEGA,
+    IMPERFECT_CSI, CSI_NOISE_STD, CSI_DELAY_STEPS, CSI_DELAY_RHO, CSI_QUANT_BITS,
 )
 
 
@@ -59,6 +61,11 @@ class CRNEnvironment:
         gamma_r:           float = GAMMA_REWARD,
         nakagami_m:        float = NAKAGAMI_M,
         nakagami_omega:    float = NAKAGAMI_OMEGA,
+        imperfect_csi:     bool  = IMPERFECT_CSI,
+        csi_noise_std:     float = CSI_NOISE_STD,
+        csi_delay_steps:   int   = CSI_DELAY_STEPS,
+        csi_delay_rho:     float = CSI_DELAY_RHO,
+        csi_quant_bits:    int   = CSI_QUANT_BITS,
         seed:              int | None = None,
     ):
         self.p_max             = p_max
@@ -72,6 +79,13 @@ class CRNEnvironment:
         self.nakagami_m        = nakagami_m
         self.nakagami_omega    = nakagami_omega
 
+        # Imperfect CSI configuration
+        self.imperfect_csi   = imperfect_csi
+        self.csi_noise_std   = csi_noise_std
+        self.csi_delay_steps = max(0, int(csi_delay_steps))
+        self.csi_delay_rho   = float(np.clip(csi_delay_rho, 0.0, 1.0))
+        self.csi_quant_bits  = max(0, int(csi_quant_bits))
+
         # Reproducible RNG (independent of global numpy state)
         self.rng = np.random.default_rng(seed)
 
@@ -79,11 +93,23 @@ class CRNEnvironment:
         self._step_count: int   = 0
         self._p_s_prev:   float = 0.0
 
-        # Last channel gains (stored so GUI can read them)
+        # Last TRUE channel gains (used by physics; GUI reads these)
         self._h_pp_sq: float = 0.0
         self._h_sp_sq: float = 0.0
         self._h_ss_sq: float = 0.0
         self._h_ps_sq: float = 0.0
+
+        # Last OBSERVED (noisy/delayed) channel gains — what the agent sees
+        self._h_pp_obs: float = 0.0
+        self._h_sp_obs: float = 0.0
+        self._h_ss_obs: float = 0.0
+        self._h_ps_obs: float = 0.0
+
+        # Delay buffer for past true gains (for stale-feedback model)
+        # Holds the last (csi_delay_steps + 1) tuples; index -1 is current truth.
+        self._gain_history: deque = deque(
+            maxlen=max(1, self.csi_delay_steps + 1)
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -93,14 +119,30 @@ class CRNEnvironment:
         """
         Start a new episode.
         Draws fresh channel gains and returns the initial 7D state.
+        Under imperfect CSI, the state contains noisy/delayed gain estimates
+        and the SINR is computed using those same estimates (the agent's
+        view of the world); reward and physics still use the true gains.
         """
         self._step_count = 0
         self._p_s_prev   = 0.0
+        self._gain_history.clear()
 
         h_pp, h_sp, h_ss, h_ps = self._draw_channels()
-        sinr_p, sinr_s = self._compute_sinr(h_pp, h_sp, h_ss, h_ps, self._p_s_prev)
 
-        return self._build_state(h_pp, h_sp, h_ss, h_ps, sinr_p, sinr_s, self._p_s_prev)
+        # Build observed (possibly noisy/delayed/quantized) gain estimates
+        h_pp_o, h_sp_o, h_ss_o, h_ps_o = self._observe_channels(
+            h_pp, h_sp, h_ss, h_ps
+        )
+
+        # SINRs in the observation are what the agent perceives — use estimates.
+        sinr_p_obs, sinr_s_obs = self._compute_sinr(
+            h_pp_o, h_sp_o, h_ss_o, h_ps_o, self._p_s_prev
+        )
+
+        return self._build_state(
+            h_pp_o, h_sp_o, h_ss_o, h_ps_o,
+            sinr_p_obs, sinr_s_obs, self._p_s_prev,
+        )
 
     def step(self, action: float) -> StepResult:
         """
@@ -116,33 +158,47 @@ class CRNEnvironment:
         # Clip action to valid range
         p_s = float(np.clip(action, 0.0, self.p_max))
 
-        # Draw fresh Rayleigh fading channel gains (block-fading model)
+        # Draw fresh Nakagami-m fading channel gains (block-fading model) — TRUE
         h_pp, h_sp, h_ss, h_ps = self._draw_channels()
 
-        # Compute SINRs and throughput
+        # ── PHYSICS uses TRUE gains ──────────────────────────────────────────
         sinr_p, sinr_s = self._compute_sinr(h_pp, h_sp, h_ss, h_ps, p_s)
         r_s = float(np.log2(1.0 + sinr_s))          # SU throughput (bits/s/Hz)
-
-        # Compute reward
         reward = self._compute_reward(sinr_p, sinr_s, p_s)
+
+        # ── OBSERVATION uses noisy/delayed/quantized estimates ───────────────
+        h_pp_o, h_sp_o, h_ss_o, h_ps_o = self._observe_channels(
+            h_pp, h_sp, h_ss, h_ps
+        )
+        sinr_p_obs, sinr_s_obs = self._compute_sinr(
+            h_pp_o, h_sp_o, h_ss_o, h_ps_o, p_s
+        )
 
         # Advance counters
         self._step_count += 1
         done = (self._step_count >= self.steps_per_episode)
 
-        # Build next state (stores current p_s as p_s_prev for next step)
-        next_state = self._build_state(h_pp, h_sp, h_ss, h_ps, sinr_p, sinr_s, p_s)
+        next_state = self._build_state(
+            h_pp_o, h_sp_o, h_ss_o, h_ps_o,
+            sinr_p_obs, sinr_s_obs, p_s,
+        )
         self._p_s_prev = p_s
 
         info = {
-            "sinr_p": sinr_p,
-            "sinr_s": sinr_s,
-            "r_s":    r_s,
-            "p_s":    p_s,
-            "h_pp":   h_pp,
-            "h_sp":   h_sp,
-            "h_ss":   h_ss,
-            "h_ps":   h_ps,
+            "sinr_p":     sinr_p,        # TRUE SINR at PR (used for outage stats)
+            "sinr_s":     sinr_s,        # TRUE SINR at SR
+            "sinr_p_obs": sinr_p_obs,    # Estimate seen by agent
+            "sinr_s_obs": sinr_s_obs,
+            "r_s":        r_s,
+            "p_s":        p_s,
+            "h_pp":       h_pp,
+            "h_sp":       h_sp,
+            "h_ss":       h_ss,
+            "h_ps":       h_ps,
+            "h_pp_obs":   h_pp_o,
+            "h_sp_obs":   h_sp_o,
+            "h_ss_obs":   h_ss_o,
+            "h_ps_obs":   h_ps_o,
         }
 
         return StepResult(state=next_state, reward=reward, done=done, info=info)
@@ -171,6 +227,64 @@ class CRNEnvironment:
         self._h_ps_sq = h_ps_sq
 
         return h_pp_sq, h_sp_sq, h_ss_sq, h_ps_sq
+
+    def _observe_channels(
+        self,
+        h_pp_sq: float, h_sp_sq: float,
+        h_ss_sq: float, h_ps_sq: float,
+    ) -> tuple[float, float, float, float]:
+        """
+        Produce the SU's noisy view of the channel gains.
+
+        Imperfect-CSI model (composition of three standard impairments):
+          1. Feedback delay  — partial mixing of stale and current gain via rho
+          2. Estimation noise — additive Gaussian, std proportional to true gain
+          3. Quantization     — uniform quantizer over [0, 4*Omega] (optional)
+
+        When `imperfect_csi=False` returns the true gains unchanged.
+        """
+        # Always push current truth into the delay buffer
+        self._gain_history.append((h_pp_sq, h_sp_sq, h_ss_sq, h_ps_sq))
+
+        if not self.imperfect_csi:
+            self._h_pp_obs = h_pp_sq
+            self._h_sp_obs = h_sp_sq
+            self._h_ss_obs = h_ss_sq
+            self._h_ps_obs = h_ps_sq
+            return h_pp_sq, h_sp_sq, h_ss_sq, h_ps_sq
+
+        # ── 1. Stale gain (feedback delay) ───────────────────────────────────
+        if self.csi_delay_steps > 0 and len(self._gain_history) >= self.csi_delay_steps + 1:
+            stale = self._gain_history[0]   # oldest in window
+        else:
+            # Buffer not yet full at episode start — fall back to current truth
+            stale = self._gain_history[0]
+
+        rho = self.csi_delay_rho
+        cur = (h_pp_sq, h_sp_sq, h_ss_sq, h_ps_sq)
+        mixed = tuple(rho * c + (1.0 - rho) * s for c, s in zip(cur, stale))
+
+        # ── 2. Estimation noise (multiplicative-style: std ~ sigma * |h|^2) ──
+        sigma = self.csi_noise_std
+        noise = self.rng.normal(0.0, sigma, size=4) * np.array(mixed)
+        noisy = np.maximum(np.array(mixed) + noise, 0.0)   # clip negatives
+
+        # ── 3. Quantization (optional) ───────────────────────────────────────
+        if self.csi_quant_bits > 0:
+            levels = 2 ** self.csi_quant_bits
+            top = 4.0 * self.nakagami_omega   # cover ~99% of Gamma mass
+            step = top / levels
+            noisy = np.minimum(noisy, top - 1e-9)
+            noisy = np.round(noisy / step) * step
+
+        h_pp_o, h_sp_o, h_ss_o, h_ps_o = (float(x) for x in noisy)
+
+        self._h_pp_obs = h_pp_o
+        self._h_sp_obs = h_sp_o
+        self._h_ss_obs = h_ss_o
+        self._h_ps_obs = h_ps_o
+
+        return h_pp_o, h_sp_o, h_ss_o, h_ps_o
 
     def _compute_sinr(
         self,

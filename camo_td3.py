@@ -288,11 +288,22 @@ class CAMO_TD3Agent:
         noise_clip:   float = NOISE_CLIP,
         policy_delay: int   = POLICY_DELAY,
         device:       str   = "auto",
+        # ── Ablation flags (default = all 4 components enabled = full CAMO-TD3) ──
+        use_multi_objective:   bool = True,
+        use_adaptive_lambda:   bool = True,
+        use_gru_belief:        bool = True,
+        use_directional_noise: bool = True,
     ):
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.p_max  = p_max
+
+        # Ablation toggles
+        self.use_multi_objective   = use_multi_objective
+        self.use_adaptive_lambda   = use_adaptive_lambda
+        self.use_gru_belief        = use_gru_belief
+        self.use_directional_noise = use_directional_noise
 
         # ── GRU Belief Encoder + target ──────────────────────────────────────
         self.belief_encoder        = BeliefEncoder(state_dim).to(device)
@@ -409,28 +420,31 @@ class CAMO_TD3Agent:
         with torch.no_grad():
             s = torch.FloatTensor(state).unsqueeze(0).to(self.device)
 
-            # Build observation history tensor
-            hist = np.array(list(self._obs_history), dtype=np.float32)
-            hist_t = torch.FloatTensor(hist).unsqueeze(0).to(self.device)  # (1, seq_len, state_dim)
+            if self.use_gru_belief:
+                hist = np.array(list(self._obs_history), dtype=np.float32)
+                hist_t = torch.FloatTensor(hist).unsqueeze(0).to(self.device)
+                belief = self.belief_encoder(hist_t)         # (1, belief_dim)
+            else:
+                belief = torch.zeros(1, BELIEF_DIM, device=self.device)
 
-            belief = self.belief_encoder(hist_t)  # (1, belief_dim)
             action = self.actor(s, belief).cpu().numpy().flatten()[0]
 
         # Update history with current observation
         self._obs_history.append(np.array(state, dtype=np.float32))
 
         if exploration_noise > 0.0:
-            # Directional noise: Gaussian with adaptive bias
             self._noise_step += 1
-            decay = max(0.0, 1.0 - self._noise_step / NOISE_DECAY_STEPS)
-
-            # Adapt bias: increase negative bias when violations are frequent
-            violation_rate = (
-                np.mean(list(self._violation_window))
-                if len(self._violation_window) > 0
-                else 0.0
-            )
-            adaptive_bias = self._mu_bias * decay * (1.0 + violation_rate)
+            if self.use_directional_noise:
+                # Adaptive directional bias toward constraint safety
+                decay = max(0.0, 1.0 - self._noise_step / NOISE_DECAY_STEPS)
+                violation_rate = (
+                    np.mean(list(self._violation_window))
+                    if len(self._violation_window) > 0
+                    else 0.0
+                )
+                adaptive_bias = self._mu_bias * decay * (1.0 + violation_rate)
+            else:
+                adaptive_bias = 0.0
 
             noise = np.random.normal(adaptive_bias, exploration_noise)
             action += noise
@@ -474,12 +488,24 @@ class CAMO_TD3Agent:
          next_states, dones,
          obs_hist, next_obs_hist) = replay_buffer.sample(batch_size)
 
-        rewards_list = [r_tput, r_intf, r_energy]
+        # When multi-objective is OFF, all six critics learn the SAME scalar reward
+        # (the original CRN reward). They become redundant; lambdas don't decompose
+        # objectives because there's nothing to decompose.
+        if self.use_multi_objective:
+            rewards_list = [r_tput, r_intf, r_energy]
+        else:
+            r_combined = r_tput + r_intf + r_energy
+            rewards_list = [r_combined, r_combined, r_combined]
 
         # ── Compute belief vectors ───────────────────────────────────────────
-        belief      = self.belief_encoder(obs_hist)
-        with torch.no_grad():
-            belief_tgt  = self.belief_encoder_target(next_obs_hist)
+        if self.use_gru_belief:
+            belief = self.belief_encoder(obs_hist)
+            with torch.no_grad():
+                belief_tgt = self.belief_encoder_target(next_obs_hist)
+        else:
+            batch = states.size(0)
+            belief     = torch.zeros(batch, BELIEF_DIM, device=self.device)
+            belief_tgt = torch.zeros(batch, BELIEF_DIM, device=self.device)
 
         # ── Target actions with policy smoothing ─────────────────────────────
         with torch.no_grad():
@@ -520,7 +546,10 @@ class CAMO_TD3Agent:
         # ── Delayed policy + lambda update ───────────────────────────────────
         if self._train_iterations % self.policy_delay == 0:
             # Recompute belief with gradient flow for actor update
-            belief_actor = self.belief_encoder(obs_hist)
+            if self.use_gru_belief:
+                belief_actor = self.belief_encoder(obs_hist)
+            else:
+                belief_actor = torch.zeros(states.size(0), BELIEF_DIM, device=self.device)
             actor_actions = self.actor(states, belief_actor)
 
             # Get Q-values for each objective from critic 1 of each pair
@@ -543,40 +572,34 @@ class CAMO_TD3Agent:
             actor_loss_val       = actor_loss.item()
             self.last_actor_loss = actor_loss_val
 
-            # ── Lagrangian update (dual gradient descent) ────────────────────
-            # Goal: increase lambda2 when interference constraint is violated,
-            #       decrease when satisfied, to maintain balance
-            with torch.no_grad():
-                mean_intf_reward = r_intf.mean().item()
-                # Constraint: interference penalty should be > some threshold
-                # If mean interference reward is very negative, violations are high
-                constraint_violation = -mean_intf_reward  # positive = bad
+            # ── Lagrangian update (dual gradient descent) — gated ────────────
+            if self.use_adaptive_lambda:
+                with torch.no_grad():
+                    mean_intf_reward     = r_intf.mean().item()
+                    constraint_violation = -mean_intf_reward  # positive = bad
 
-            # Update lambdas: maximize lambda * (constraint_slack)
-            # Use negative because optimizer minimizes
-            lambda_loss = (
-                -self._log_lambda1 * r_tput.mean().detach()
-                + self._log_lambda2 * constraint_violation
-                - self._log_lambda3 * r_energy.mean().detach()
-            )
+                lambda_loss = (
+                    -self._log_lambda1 * r_tput.mean().detach()
+                    + self._log_lambda2 * constraint_violation
+                    - self._log_lambda3 * r_energy.mean().detach()
+                )
 
-            self.lambda_optimizer.zero_grad()
-            lambda_loss.backward()
-            self.lambda_optimizer.step()
+                self.lambda_optimizer.zero_grad()
+                lambda_loss.backward()
+                self.lambda_optimizer.step()
 
-            # Clamp lambdas to [LAMBDA_MIN, LAMBDA_MAX] to prevent death spiral
-            # We clamp in log-space: log_lambda = log(inv_softplus(clamp(softplus(log_lambda))))
-            with torch.no_grad():
-                for log_lam in [self._log_lambda1, self._log_lambda2, self._log_lambda3]:
-                    lam_val = F.softplus(log_lam)
-                    clamped  = lam_val.clamp(LAMBDA_MIN, LAMBDA_MAX)
-                    # Invert softplus: log_lam = log(exp(clamped) - 1)
-                    new_log = torch.log(torch.expm1(clamped).clamp(min=1e-6))
-                    log_lam.copy_(new_log)
+                # Clamp lambdas to [LAMBDA_MIN, LAMBDA_MAX]
+                with torch.no_grad():
+                    for log_lam in [self._log_lambda1, self._log_lambda2, self._log_lambda3]:
+                        lam_val = F.softplus(log_lam)
+                        clamped  = lam_val.clamp(LAMBDA_MIN, LAMBDA_MAX)
+                        new_log = torch.log(torch.expm1(clamped).clamp(min=1e-6))
+                        log_lam.copy_(new_log)
 
             # Soft-update all target networks
             self._soft_update(self.actor, self.actor_target)
-            self._soft_update(self.belief_encoder, self.belief_encoder_target)
+            if self.use_gru_belief:
+                self._soft_update(self.belief_encoder, self.belief_encoder_target)
             for i in range(6):
                 self._soft_update(self.critics[i], self.critic_tgts[i])
 
